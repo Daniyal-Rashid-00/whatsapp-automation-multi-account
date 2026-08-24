@@ -1,0 +1,15 @@
+{
+  "name": "cybersolu-wa-web-engine",
+  "version": "1.0.0",
+  "description": "Embedded WhatsApp Web Gateway for CyberSolu Auto",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "qrcode": "^1.5.3",
+    "whatsapp-web.js": "^1.26.0"
+  }
+}
