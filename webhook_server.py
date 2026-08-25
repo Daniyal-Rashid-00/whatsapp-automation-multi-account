@@ -17,11 +17,16 @@ app = FastAPI(title="NexusAutomata Webhook Gateway")
 
 # Per-session status registry — supports multi-account (session_name -> status string)
 _session_status_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None
+_message_enqueued_callback: Optional[Callable[[], None]] = None
 _session_statuses: Dict[str, str] = {}  # session_name -> status
 
 def set_session_status_callback(cb: Callable[[str, Dict[str, Any]], None]):
     global _session_status_callback
     _session_status_callback = cb
+
+def set_message_enqueued_callback(cb: Callable[[], None]):
+    global _message_enqueued_callback
+    _message_enqueued_callback = cb
 
 def get_current_session_status(session_name: str = None) -> str:
     """Returns the live status for a specific session, or 'STARTING' if unknown."""
@@ -118,6 +123,22 @@ async def receive_webhook(request: Request):
             logging.info(f"⏳ Ignoring empty/undecrypted placeholder for message {message_id}, waiting for decrypted update...")
             return {"status": "ignored_empty"}
 
+        # Ignore media-only messages without text caption (voice notes, images, stickers, videos)
+        if not from_me and not body.strip() and payload.get("hasMedia", False):
+            logging.info(f"📷 Dropping inbound media-only message {message_id} from {chat_id} (no text caption)")
+            return {"status": "ignored_media_no_body"}
+
+        # Ignore historical sync messages older than 60 seconds (synced during startup)
+        msg_timestamp = payload.get("timestamp") or payload.get("t")
+        if msg_timestamp:
+            import time
+            try:
+                if time.time() - float(msg_timestamp) > 60:
+                    logging.info(f"⌛ Dropping historical synced message {message_id} ({time.time() - float(msg_timestamp):.0f}s old)")
+                    return {"status": "ignored_historical"}
+            except Exception:
+                pass
+
         # Deduplication Filter (Section 3.1 & FR-08)
         if is_message_duplicate(message_id):
             logging.info(f"Deduplication filter dropped repeat message: {message_id}")
@@ -128,6 +149,11 @@ async def receive_webhook(request: Request):
         success = enqueue_inbound_message(message_id, chat_id, body, raw_json, session_name=session)
         if success:
             logging.info(f"Message enqueued: {message_id} from {chat_id} via session [{session}]")
+            if _message_enqueued_callback:
+                try:
+                    _message_enqueued_callback()
+                except Exception as e:
+                    logging.warning(f"Error calling message enqueued callback: {e}")
             return {"status": "enqueued"}
         else:
             return {"status": "enqueue_failed"}

@@ -1,3 +1,4 @@
+from PyQt6.QtGui import QColor
 import json
 from datetime import datetime
 from PyQt6.QtWidgets import (
@@ -113,7 +114,8 @@ class DashboardPage(QWidget):
         q = db.get_queue_metrics()
         pending = q.get("pending", 0)
         done = q.get("done", 0)
-        self.card_queue.set_value(f"{pending} Pending", f"{done} Processed successfully")
+        ignored = q.get("ignored", 0)
+        self.card_queue.set_value(f"{pending} Pending", f"{done} Replied • {ignored} Ignored")
 
         # Sends metrics
         today_sends = db.get_today_send_count()
@@ -142,7 +144,7 @@ class DashboardPage(QWidget):
         # Refresh recent activity table from DB
         conn = db.get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT message_id, chat_id, body, raw_payload, session_name, status, received_at FROM inbound_queue ORDER BY received_at DESC LIMIT 15;")
+        cursor.execute("SELECT message_id, chat_id, body, raw_payload, session_name, status, received_at FROM inbound_queue ORDER BY received_at DESC LIMIT 25;")
         rows = cursor.fetchall()
         conn.close()
 
@@ -173,7 +175,29 @@ class DashboardPage(QWidget):
             self.table.setItem(r_idx, 1, QTableWidgetItem(customer_num))
             self.table.setItem(r_idx, 2, QTableWidgetItem(account_label))
             self.table.setItem(r_idx, 3, QTableWidgetItem(r['body'] or ""))
-            self.table.setItem(r_idx, 4, QTableWidgetItem(r['status'].upper()))
+
+            # Status with distinct colored badges
+            status_raw = (r['status'] or 'pending').lower()
+            if status_raw in ('done', 'replied', 'sent'):
+                status_text = "● Replied"
+                status_color = QColor("#22C55E")
+            elif status_raw == 'ignored':
+                status_text = "○ Ignored"
+                status_color = QColor("#F59E0B")
+            elif status_raw == 'failed':
+                status_text = "✕ Failed"
+                status_color = QColor("#EF4444")
+            elif status_raw == 'processing':
+                status_text = "⏳ Processing"
+                status_color = QColor("#38BDF8")
+            else:
+                status_text = f"⏳ {status_raw.capitalize()}"
+                status_color = QColor("#60A5FA")
+
+            item_status = QTableWidgetItem(status_text)
+            item_status.setForeground(status_color)
+            item_status.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(r_idx, 4, item_status)
 
             raw_ts = str(r['received_at'])
             formatted_ts = raw_ts
@@ -184,7 +208,9 @@ class DashboardPage(QWidget):
             except Exception:
                 pass
 
-            self.table.setItem(r_idx, 5, QTableWidgetItem(formatted_ts))
+            item_ts = QTableWidgetItem(formatted_ts)
+            item_ts.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(r_idx, 5, item_ts)
 
     def _manual_refresh_action(self):
         self.refresh_metrics()

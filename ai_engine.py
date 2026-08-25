@@ -5,6 +5,8 @@ from typing import Optional, Dict, Any
 from database import get_setting, get_all_rules
 from vault import retrieve_secret
 
+from ai_key_pool import key_pool
+
 DEFAULT_FALLBACK_REPLY = ""
 
 # Default system context used only when user has NOT configured one in the AI Settings page.
@@ -57,22 +59,21 @@ async def generate_ai_response(sender_id: str, inbound_body: str, source_hint: O
     """
     Generates AI response using Gemini or OpenRouter API.
     Combines Rule Book + Knowledge Sandbox for accurate Roman Urdu replies.
-    Uses gemini-3.5-flash-lite as the default for high-speed, high-volume business automation.
+    Uses multi-key round-robin rotation via AIKeyPool for high-speed concurrent processing.
     """
-    # Recommended free fast model for high-volume WhatsApp chat automation (Google Gemini 3.5 series)
     _BEST_FREE_MODEL = "gemini-3.5-flash-lite"
 
     provider = get_setting("ai_provider", "gemini").lower()
     model_name = get_setting("ai_model_name", _BEST_FREE_MODEL)
-    # Normalize deprecated model names to the active working free model
     if model_name in ("gemini-1.5-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.1-flash-lite"):
         model_name = _BEST_FREE_MODEL
-    context_text = get_setting("ai_system_context", "")  # User-configured from Settings page
-    key_ref = get_setting("ai_api_key_ref", "nexus_ai_key")
-    api_key = retrieve_secret(key_ref)
+    context_text = get_setting("ai_system_context", "")
+
+    # Retrieve next available key from Key Pool (Round-Robin)
+    api_key = key_pool.get_next_key()
 
     if not api_key:
-        logging.warning("AI Fallback triggered but no API key stored in vault.")
+        logging.warning("AI Fallback triggered but no API keys found in vault or key pool.")
         return DEFAULT_FALLBACK_REPLY
 
     # Fetch active rules to provide AI with live Rule Book context
@@ -141,7 +142,19 @@ async def generate_ai_response(sender_id: str, inbound_body: str, source_hint: O
                                 logging.info(f"AI could not answer from Rule Book for message from {sender_id}. Silently ignoring.")
                                 return DEFAULT_FALLBACK_REPLY
                             return reply
-                logging.warning(f"AI API request failed attempt {attempt+1}: Status {resp.status_code} {resp.text}")
+
+                # Handle HTTP 429 Rate Limiting — rotate to next key immediately
+                if resp.status_code == 429:
+                    key_pool.mark_rate_limited(api_key, cooldown_seconds=60.0)
+                    next_k = key_pool.get_next_key()
+                    if next_k and next_k != api_key:
+                        api_key = next_k
+                        if provider == "gemini":
+                            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+                        else:
+                            headers["Authorization"] = f"Bearer {api_key}"
+
+                logging.warning(f"AI API request failed attempt {attempt+1}: Status {resp.status_code} {resp.text[:120]}")
                 
                 # If Gemini returned 404 (deprecated model), auto-switch to the working lite model
                 if provider == "gemini" and resp.status_code == 404 and model_name != _BEST_FREE_MODEL:
@@ -152,6 +165,44 @@ async def generate_ai_response(sender_id: str, inbound_body: str, source_hint: O
             logging.warning(f"AI API request exception attempt {attempt+1}: {e}")
         
         if attempt == 0:
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
 
     return DEFAULT_FALLBACK_REPLY
+
+
+async def test_ai_connection(api_key: str, model_name: str = "gemini-3.5-flash-lite", provider: str = "gemini"):
+    """
+    Sends a test ping to the AI provider to verify connectivity and measure latency.
+    Returns (success: bool, message: str, latency_seconds: float).
+    """
+    import time
+    start_t = time.time()
+    try:
+        if provider == "gemini":
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+            body = {
+                "contents": [{"role": "user", "parts": [{"text": "Say 'OK' in one word."}]}],
+                "generationConfig": {"max_output_tokens": 10, "temperature": 0.0}
+            }
+            headers = {"Content-Type": "application/json"}
+        else:
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            body = {
+                "model": model_name,
+                "messages": [{"role": "user", "content": "Say 'OK' in one word."}],
+                "max_tokens": 10,
+                "temperature": 0.0
+            }
+            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.post(url, json=body, headers=headers)
+            elapsed = time.time() - start_t
+            if resp.status_code == 200:
+                return True, f"Connection verified in {elapsed:.2f}s!", elapsed
+            else:
+                return False, f"HTTP {resp.status_code}: {resp.text[:120]}", elapsed
+    except Exception as e:
+        elapsed = time.time() - start_t
+        return False, f"Network Error: {str(e)[:120]}", elapsed
+

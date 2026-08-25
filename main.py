@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 from PyQt6.QtWidgets import QApplication
 
 from database import init_db, get_setting, get_all_accounts
-from webhook_server import run_webhook_server
+from webhook_server import run_webhook_server, set_message_enqueued_callback
 from queue_processor import DurableQueueProcessor
 from main_window import MainWindow
 from waha_launcher import WAHALauncher
@@ -99,8 +99,9 @@ def main():
     # 2. Start Webhook Gateway Server
     start_webhook_background_thread()
 
-    # 3. Start Durable Queue Consumer Loop
-    processor = DurableQueueProcessor()
+    # 3. Start Durable Queue Consumer Loop (Event-Driven & Parallel)
+    processor = DurableQueueProcessor(max_concurrent_workers=4)
+    set_message_enqueued_callback(processor.notify_new_message)
     start_queue_worker_thread(processor)
 
     # 4. Auto-start Baileys WhatsApp Engine

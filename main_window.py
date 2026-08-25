@@ -204,6 +204,10 @@ class MainWindow(QMainWindow):
         self.refresh_rules_matrix()
 
     def closeEvent(self, event):
+        try:
+            db.clear_activity_logs()
+        except Exception:
+            pass
         w_url = db.get_setting("waha_url", "http://localhost:3000").rstrip("/")
         try:
             port = int(w_url.split(":")[-1])

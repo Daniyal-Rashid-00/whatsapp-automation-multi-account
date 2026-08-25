@@ -328,21 +328,21 @@ class AccountsPage(QWidget):
                 db.add_account(session_name=session_name, account_alias=clean_alias)
                 self._last_session_names = []  # Force table rebuild
                 self.refresh_accounts_matrix()
-                self._start_session_action(session_name)
+                self._start_session_action(session_name, force_new=True)
             except Exception as e:
                 QMessageBox.warning(self, "Account Error", f"Could not add account: {e}")
 
-    def _start_session_action(self, session_name: str):
+    def _start_session_action(self, session_name: str, force_new: bool = False):
         """Starts/opens the visible Chromium WhatsApp Web tab for this account."""
         db.update_account_status(session_name, "STARTING", last_error=None)
         self.refresh_accounts_matrix()
         threading.Thread(
             target=self._start_session_background,
-            args=(session_name,),
+            args=(session_name, force_new),
             daemon=True
         ).start()
 
-    def _start_session_background(self, session_name: str):
+    def _start_session_background(self, session_name: str, force_new: bool = False):
         try:
             w_url = db.get_setting("waha_url", "http://localhost:3000").rstrip("/")
             try:
@@ -350,7 +350,11 @@ class AccountsPage(QWidget):
             except Exception:
                 port = 3000
             WAHALauncher.start_waha_engine(port=port)
-            httpx.post(f"{w_url}/api/sessions/start", json={"session": session_name}, timeout=8.0)
+            httpx.post(
+                f"{w_url}/api/sessions/start",
+                json={"session": session_name, "scan_qr": force_new, "force_new": force_new},
+                timeout=8.0
+            )
         except Exception:
             pass
 

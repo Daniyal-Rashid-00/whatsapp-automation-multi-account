@@ -78,7 +78,7 @@ def init_db():
         body TEXT,
         raw_payload TEXT NOT NULL,
         session_name TEXT DEFAULT 'default',
-        status TEXT CHECK(status IN ('pending', 'processing', 'done', 'failed')) DEFAULT 'pending',
+        status TEXT CHECK(status IN ('pending', 'processing', 'done', 'failed', 'ignored')) DEFAULT 'pending',
         received_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
         processed_at TIMESTAMP
     );
@@ -130,6 +130,8 @@ def init_db():
         ('ai_model_name', 'gemini-2.5-flash'),
         ('ai_model_last_verified', ''),
         ('ai_api_key_ref', 'nexus_ai_key'),
+        ('ai_api_key_ref_2', 'nexus_ai_key_2'),
+        ('ai_api_key_ref_3', 'nexus_ai_key_3'),
         ('ai_system_context', 'Aap VoltCom Apparel ke WhatsApp Virtual Support Assistant hain. Aap customer inquiries ka jawab Roman Urdu me polite, professional, aur short points me dein.'),
         ('waha_api_key_ref', 'nexus_waha_key'),
         ('waha_url', 'http://localhost:3000'),
@@ -152,20 +154,27 @@ def init_db():
     conn.commit()
     conn.close()
 
-    # Recover any in-flight queue items left from crash/restart and sync sessions
-    recover_dangling_queue_items()
+    # Fresh session startup: clear all old queue items, send logs, and dedup so app starts clean
+    reset_session_queue_on_startup()
     sync_session_folders_to_db()
 
-def recover_dangling_queue_items():
-    """Recovers any items left in 'processing' state from a crash/restart back to 'pending'."""
+def reset_session_queue_on_startup():
+    """
+    Clears all past queue items, message dedup hashes, and send logs so that
+    the software always starts with 0 messages queued and a clean activity log.
+    Prevents backlog processing or hanging upon launching.
+    """
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("UPDATE inbound_queue SET status = 'pending' WHERE status = 'processing';")
-    # Clean up completed messages older than 7 days to keep database compact
-    cursor.execute("DELETE FROM inbound_queue WHERE status = 'done' AND received_at < datetime('now', '-7 days');")
-    cursor.execute("DELETE FROM send_log WHERE sent_at < datetime('now', '-30 days');")
+    cursor.execute("DELETE FROM inbound_queue;")
+    cursor.execute("DELETE FROM message_dedup;")
+    cursor.execute("DELETE FROM send_log;")
     conn.commit()
     conn.close()
+
+def recover_dangling_queue_items():
+    """Recovers any items left in 'processing' state back to 'pending' (legacy alias)."""
+    reset_session_queue_on_startup()
 
 def clear_activity_logs():
     """Clear past activity logs (inbound queue and send logs)."""
@@ -385,6 +394,8 @@ def delete_account(session_name: str):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM whatsapp_accounts WHERE session_name = ?;", (session_name,))
+    # Mark any pending messages for this deleted session as ignored to avoid hanging
+    cursor.execute("UPDATE inbound_queue SET status = 'ignored' WHERE session_name = ? AND status = 'pending';", (session_name,))
     conn.commit()
     conn.close()
 
@@ -477,7 +488,7 @@ def get_queue_metrics() -> Dict[str, int]:
     cursor.execute("SELECT status, COUNT(*) as count FROM inbound_queue GROUP BY status;")
     rows = cursor.fetchall()
     conn.close()
-    counts = {"pending": 0, "processing": 0, "done": 0, "failed": 0}
+    counts = {"pending": 0, "processing": 0, "done": 0, "failed": 0, "ignored": 0}
     for row in rows:
         counts[row['status']] = row['count']
     return counts

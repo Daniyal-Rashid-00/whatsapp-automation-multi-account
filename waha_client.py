@@ -60,6 +60,7 @@ class WAHAClient:
             return False
 
     async def send_text(self, chat_id: str, text: str, session: str = "default") -> bool:
+        import asyncio
         base_url = self._get_base_url()
         url = f"{base_url}/api/sendText"
         payload = {
@@ -67,19 +68,25 @@ class WAHAClient:
             "text": text,
             "session": session
         }
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(url, json=payload, headers=self._get_headers())
-                if resp.status_code in (200, 201):
-                    logger.info(f"Successfully sent reply to {chat_id} via session [{session}]")
-                    return True
-                logger.error(f"WAHA sendText failed to {url}: Status {resp.status_code} - {resp.text}")
-                return False
-        except Exception as e:
-            logger.error(f"WAHA sendText exception connecting to {url}: {e}")
-            return False
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.post(url, json=payload, headers=self._get_headers())
+                    if resp.status_code in (200, 201):
+                        logger.info(f"Successfully sent reply to {chat_id} via session [{session}]")
+                        return True
+                    logger.error(f"WAHA sendText failed to {url}: Status {resp.status_code} - {resp.text}")
+                    return False
+            except Exception as e:
+                if attempt == 0:
+                    await asyncio.sleep(2.0)
+                else:
+                    logger.error(f"WAHA sendText exception connecting to {url}: {e}")
+                    return False
+        return False
 
     async def send_file(self, chat_id: str, local_path: str, mime_type: str, filename: str, caption: str = "", session: str = "default") -> bool:
+        import asyncio
         base_url = self._get_base_url()
         url = f"{base_url}/api/sendFile"
         
@@ -94,17 +101,22 @@ class WAHAClient:
             "session": session
         }
 
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(url, json=payload, headers=self._get_headers())
-                if resp.status_code in (200, 201):
-                    logger.info(f"Successfully sent file attachment {filename} to {chat_id} via session [{session}]")
-                    return True
-                logger.error(f"WAHA sendFile failed to {url}: Status {resp.status_code} - {resp.text}")
-                return False
-        except Exception as e:
-            logger.error(f"WAHA sendFile exception connecting to {url}: {e}")
-            return False
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.post(url, json=payload, headers=self._get_headers())
+                    if resp.status_code in (200, 201):
+                        logger.info(f"Successfully sent file attachment {filename} to {chat_id} via session [{session}]")
+                        return True
+                    logger.error(f"WAHA sendFile failed to {url}: Status {resp.status_code} - {resp.text}")
+                    return False
+            except Exception as e:
+                if attempt == 0:
+                    await asyncio.sleep(2.0)
+                else:
+                    logger.error(f"WAHA sendFile exception connecting to {url}: {e}")
+                    return False
+        return False
 
     async def get_all_sessions(self) -> List[Dict[str, Any]]:
         base_url = self._get_base_url()

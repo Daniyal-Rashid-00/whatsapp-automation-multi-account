@@ -143,6 +143,11 @@ class SidebarNavWidget(QFrame):
         from waha_launcher import WAHALauncher
         import database as db
 
+        try:
+            db.clear_activity_logs()
+        except Exception:
+            pass
+
         w_url = db.get_setting("waha_url", "http://localhost:3000").rstrip("/")
         try:
             port = int(w_url.split(":")[-1])

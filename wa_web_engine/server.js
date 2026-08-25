@@ -121,11 +121,20 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
 
     console.log(`🚀 [${sessionName}] Launching WhatsApp Web client in visible Chromium...`);
 
-    // Clean previous session restore state so Chromium NEVER opens duplicate tabs on launch
-    const sessionRestoreDir = path.join(sessionsDir, `session-${sessionName}`, 'Default', 'Sessions');
+    // Clean crash locks and session restore state so Chromium launches cleanly after sudden power outage / crash
+    const profileDir = path.join(sessionsDir, `session-${sessionName}`);
+    const sessionRestoreDir = path.join(profileDir, 'Default', 'Sessions');
     try {
       if (fs.existsSync(sessionRestoreDir)) {
         fs.rmSync(sessionRestoreDir, { recursive: true, force: true });
+      }
+      const singletonLock = path.join(profileDir, 'SingletonLock');
+      if (fs.existsSync(singletonLock)) {
+        fs.rmSync(singletonLock, { force: true });
+      }
+      const singletonCookie = path.join(profileDir, 'SingletonCookie');
+      if (fs.existsSync(singletonCookie)) {
+        fs.rmSync(singletonCookie, { force: true });
       }
     } catch (e) {}
 
@@ -258,81 +267,117 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
       }
     });
 
-    // Inbound Customer Messages
-    client.on('message', async (msg) => {
+    // Message Deduplication cache to prevent duplicate webhooks
+    const processedMsgIds = new Set();
+    setInterval(() => {
+      if (processedMsgIds.size > 2000) {
+        processedMsgIds.clear();
+      }
+    }, 60000);
+
+    // Unified Message Handler: Captures 100% of messages (saved contacts, active chats, background sync, incoming & outgoing)
+    const handleAnyMessage = async (msg) => {
       try {
         if (!msg) return;
+        const messageId = (msg.id && msg.id._serialized) ? msg.id._serialized : ((msg.id && msg.id.id) ? msg.id.id : String(Date.now()));
+        
+        // Prevent duplicate processing
+        if (processedMsgIds.has(messageId)) return;
+        processedMsgIds.add(messageId);
+
         const fromJid = msg.from || '';
-        if (!fromJid || fromJid.endsWith('@g.us') || fromJid.includes('@broadcast') || fromJid === 'status@broadcast') return;
+        const toJid = msg.to || '';
+        const isFromMe = Boolean(msg.fromMe);
 
-        const body = msg.body || '';
-        const hasMedia = Boolean(msg.hasMedia);
+        // Skip status broadcast and groups
+        if (fromJid.endsWith('@g.us') || toJid.endsWith('@g.us') || fromJid.includes('@broadcast') || fromJid === 'status@broadcast') return;
 
-        if (!body && !hasMedia) return;
-
-        const senderPhone = fromJid.split('@')[0];
-        let pushName = senderPhone;
+        // Skip archived chats completely (respect user's manual archive organization)
         try {
-          const contact = await msg.getContact();
-          if (contact && (contact.pushname || contact.name)) {
-            pushName = contact.pushname || contact.name;
+          const chat = await msg.getChat();
+          if (chat && chat.archived) {
+            console.log(`🗂️ [${sessionName}] Skipping message from archived chat: ${fromJid || toJid}`);
+            return;
           }
         } catch (e) {}
 
-        const messageId = (msg.id && msg.id._serialized) ? msg.id._serialized : ((msg.id && msg.id.id) ? msg.id.id : String(Date.now()));
+        const body = msg.body || '';
+        const hasMedia = Boolean(msg.hasMedia);
+        if (!body && !hasMedia) return;
+
+        // Skip inbound media-only messages (voice notes, images, stickers, videos with NO text caption)
+        // This saves CPU, SQLite queue writes, and AI token costs.
+        if (!isFromMe && !body.trim() && hasMedia) {
+          console.log(`📷 [${sessionName}] Skipping inbound media-only message (no text) from ${fromJid}`);
+          return;
+        }
+
         const timestamp = msg.timestamp || Math.floor(Date.now() / 1000);
+        const nowSec = Math.floor(Date.now() / 1000);
 
-        console.log(`📩 [${sessionName}] Inbound message from ${pushName} (${senderPhone}): "${body.slice(0, 80)}"`);
+        // Skip historical messages synced from phone during startup (older than 60 seconds)
+        // Ensures each new session starts completely fresh with 0 backlog
+        if (nowSec - Number(timestamp) > 60) {
+          console.log(`⌛ [${sessionName}] Skipping historical synced message (${nowSec - Number(timestamp)}s old): ${messageId}`);
+          return;
+        }
 
-        sendWebhookPayload({
-          event: 'message',
-          session: sessionName,
-          payload: {
-            id: messageId,
+        if (isFromMe) {
+          // Outbound message sent by human from phone/web -> triggers Human Takeover in backend
+          const customerPhone = toJid.split('@')[0];
+          console.log(`📤 [${sessionName}] Outbound message to ${toJid}: "${body.slice(0, 50)}"`);
+          sendWebhookPayload({
+            event: 'message',
             session: sessionName,
-            from: fromJid,
-            phone: senderPhone,
-            name: pushName,
-            body: body,
-            fromMe: false,
-            timestamp: timestamp,
-            hasMedia: hasMedia
-          }
-        });
+            payload: {
+              id: messageId,
+              session: sessionName,
+              from: fromJid,
+              to: toJid,
+              chatId: toJid,
+              phone: customerPhone,
+              body: body,
+              fromMe: true,
+              timestamp: timestamp,
+              hasMedia: hasMedia
+            }
+          });
+        } else {
+          // Inbound customer message (saved contacts, @lid, @c.us, active chats)
+          const senderPhone = fromJid.split('@')[0];
+          let pushName = senderPhone;
+          try {
+            const contact = await msg.getContact();
+            if (contact && (contact.pushname || contact.name || contact.verifiedName)) {
+              pushName = contact.pushname || contact.name || contact.verifiedName;
+            }
+          } catch (e) {}
+
+          console.log(`📩 [${sessionName}] Inbound message from ${pushName} (${fromJid}): "${body.slice(0, 80)}"`);
+          sendWebhookPayload({
+            event: 'message',
+            session: sessionName,
+            payload: {
+              id: messageId,
+              session: sessionName,
+              from: fromJid,
+              chatId: fromJid,
+              phone: senderPhone,
+              name: pushName,
+              body: body,
+              fromMe: false,
+              timestamp: timestamp,
+              hasMedia: hasMedia
+            }
+          });
+        }
       } catch (err) {
-        console.warn(`⚠️ [${sessionName}] Error handling inbound message:`, err?.message);
+        console.warn(`⚠️ [${sessionName}] Error handling message:`, err?.message);
       }
-    });
+    };
 
-    // Outbound Message Creation -> Human Takeover Detection
-    client.on('message_create', async (msg) => {
-      try {
-        if (!msg || !msg.fromMe) return;
-        const toJid = msg.to || '';
-        if (!toJid || toJid.endsWith('@g.us') || toJid.includes('@broadcast')) return;
-
-        const customerPhone = toJid.split('@')[0];
-        const messageId = (msg.id && msg.id._serialized) ? msg.id._serialized : ((msg.id && msg.id.id) ? msg.id.id : String(Date.now()));
-        const timestamp = msg.timestamp || Math.floor(Date.now() / 1000);
-
-        sendWebhookPayload({
-          event: 'message',
-          session: sessionName,
-          payload: {
-            id: messageId,
-            session: sessionName,
-            from: msg.from,
-            to: toJid,
-            chatId: toJid,
-            phone: customerPhone,
-            body: msg.body || '',
-            fromMe: true,
-            timestamp: timestamp,
-            hasMedia: Boolean(msg.hasMedia)
-          }
-        });
-      } catch (e) {}
-    });
+    client.on('message_create', handleAnyMessage);
+    client.on('message', handleAnyMessage);
 
     try {
       client.initialize().catch(err => {
