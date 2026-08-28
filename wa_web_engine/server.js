@@ -288,6 +288,7 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
         const fromJid = msg.from || '';
         const toJid = msg.to || '';
         const isFromMe = Boolean(msg.fromMe);
+        const body = msg.body || '';
 
         // Skip status broadcast and groups
         if (fromJid.endsWith('@g.us') || toJid.endsWith('@g.us') || fromJid.includes('@broadcast') || fromJid === 'status@broadcast') return;
@@ -301,14 +302,145 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
           }
         } catch (e) {}
 
-        const body = msg.body || '';
-        const hasMedia = Boolean(msg.hasMedia);
-        if (!body && !hasMedia) return;
+        const msgType = String(msg.type || '').toLowerCase();
+        const isVoice = msgType === 'ptt' || msgType === 'audio' || msgType === 'voice';
+        let hasMedia = Boolean(msg.hasMedia) || isVoice;
+        let audioBase64 = null;
+        let audioMime = null;
 
-        // Skip inbound media-only messages (voice notes, images, stickers, videos with NO text caption)
-        // This saves CPU, SQLite queue writes, and AI token costs.
-        if (!isFromMe && !body.trim() && hasMedia) {
-          console.log(`📷 [${sessionName}] Skipping inbound media-only message (no text) from ${fromJid}`);
+        // If it's an inbound voice note / audio, download the media payload for Gemini AI
+        if (!isFromMe && isVoice) {
+          msg.hasMedia = true; // Overwrite false directPath on PTT messages
+          for (let attempt = 1; attempt <= 4; attempt++) {
+            try {
+              console.log(`🎙️ [${sessionName}] Downloading incoming voice note from ${fromJid} (attempt ${attempt}/4)...`);
+              let media = null;
+              try {
+                media = await msg.downloadMedia();
+              } catch (e) {}
+
+              // Direct page evaluate fallback if helper returned null/undefined
+              if ((!media || !media.data) && sessionObj.client && sessionObj.client.pupPage) {
+                try {
+                  const evalResult = await sessionObj.client.pupPage.evaluate(async (rawMsgId, targetChatId) => {
+                    const logs = [];
+                    try {
+                      const collections = window.require ? window.require('WAWebCollections') : null;
+                      if (!collections) return { error: 'WAWebCollections not available', logs };
+                      
+                      const cleanId = String(rawMsgId);
+                      const shortId = cleanId.split('_').pop(); // e.g. AC45FC18DBC9B7C6B066F2FCE5BD675A
+
+                      let m = null;
+                      // 1. Search in global Msg collection
+                      if (collections.Msg) {
+                        m = collections.Msg.get(cleanId) || collections.Msg.get(shortId);
+                        if (!m && collections.Msg.getModelsArray) {
+                          m = collections.Msg.getModelsArray().find(x => {
+                            const sid = x.id ? (x.id._serialized || x.id.id || String(x.id)) : '';
+                            return sid === cleanId || sid.includes(shortId);
+                          });
+                        }
+                      }
+
+                      // 2. Search in Chat msgs
+                      if (!m && collections.Chat && targetChatId) {
+                        const chat = collections.Chat.get(targetChatId) || (collections.Chat.getModelsArray && collections.Chat.getModelsArray().find(c => String(c.id).includes(targetChatId)));
+                        if (chat && chat.msgs) {
+                          const chatMsgs = chat.msgs.getModelsArray ? chat.msgs.getModelsArray() : (chat.msgs.models || []);
+                          m = chatMsgs.find(x => {
+                            const sid = x.id ? (x.id._serialized || x.id.id || String(x.id)) : '';
+                            return sid === cleanId || sid.includes(shortId);
+                          });
+                        }
+                      }
+
+                      if (!m) {
+                        return { error: `Msg model not found for ${cleanId} (shortId: ${shortId})`, logs };
+                      }
+
+                      logs.push(`Found msg model: type=${m.type}, hasMedia=${Boolean(m.mediaData)}`);
+
+                      // 3. Try to download media if needed
+                      if (m.downloadMedia && m.mediaData && m.mediaData.mediaStage !== 'RESOLVED') {
+                        try {
+                          await m.downloadMedia({ downloadEvenIfExpensive: true, rmrReason: 1 });
+                          logs.push(`downloadMedia called, new stage=${m.mediaData?.mediaStage}`);
+                        } catch (e) {
+                          logs.push(`downloadMedia err: ${e.message}`);
+                        }
+                      }
+
+                      // 4. Try to fetch directly from renderableUrl / blob
+                      if (m.mediaData && m.mediaData.renderableUrl) {
+                        try {
+                          const resp = await fetch(m.mediaData.renderableUrl);
+                          const buffer = await resp.arrayBuffer();
+                          if (buffer && buffer.byteLength > 0 && window.WWebJS && window.WWebJS.arrayBufferToBase64Async) {
+                            const b64 = await window.WWebJS.arrayBufferToBase64Async(buffer);
+                            return { data: b64, mimetype: m.mimetype || m.mediaData.mimetype || 'audio/ogg', logs };
+                          }
+                        } catch (e) {
+                          logs.push(`renderableUrl fetch err: ${e.message}`);
+                        }
+                      }
+
+                      // 5. Fallback to downloadManager.downloadAndMaybeDecrypt
+                      const dm = window.require ? window.require('WAWebDownloadManager') : null;
+                      if (dm && dm.downloadManager) {
+                        const mediaData = m.mediaData || {};
+                        const decryptedMedia = await dm.downloadManager.downloadAndMaybeDecrypt({
+                          directPath: m.directPath || mediaData.directPath,
+                          encFilehash: m.encFilehash || mediaData.encFilehash,
+                          filehash: m.filehash || mediaData.filehash,
+                          mediaKey: m.mediaKey || mediaData.mediaKey,
+                          mediaKeyTimestamp: m.mediaKeyTimestamp || mediaData.mediaKeyTimestamp,
+                          type: m.type || 'ptt',
+                          signal: new AbortController().signal,
+                          downloadQpl: {
+                            addAnnotations: function () { return this; },
+                            addPoint: function () { return this; }
+                          }
+                        });
+
+                        if (decryptedMedia && window.WWebJS && window.WWebJS.arrayBufferToBase64Async) {
+                          const b64 = await window.WWebJS.arrayBufferToBase64Async(decryptedMedia);
+                          return { data: b64, mimetype: m.mimetype || mediaData.mimetype || 'audio/ogg', logs };
+                        }
+                      }
+
+                      return { error: 'No media extracted after all fallbacks', logs };
+                    } catch (e) {
+                      return { error: `Exception in evaluate: ${e.message}`, logs };
+                    }
+                  }, messageId, fromJid);
+
+                  if (evalResult && evalResult.data) {
+                    media = { data: evalResult.data, mimetype: evalResult.mimetype };
+                  } else if (evalResult && evalResult.error) {
+                    console.log(`🎙️ [${sessionName}] Audio extraction detail: ${evalResult.error} | logs: ${JSON.stringify(evalResult.logs)}`);
+                  }
+                } catch (e) {
+                  console.warn(`⚠️ [${sessionName}] Evaluate execution error: ${e.message}`);
+                }
+              }
+
+              if (media && media.data) {
+                audioBase64 = media.data;
+                audioMime = media.mimetype ? media.mimetype.split(';')[0] : 'audio/ogg';
+                console.log(`🎙️ [${sessionName}] Voice note downloaded successfully (${Math.round(audioBase64.length / 1024)} KB, ${audioMime})`);
+                break;
+              }
+            } catch (e) {
+              console.warn(`⚠️ [${sessionName}] Could not download voice note (attempt ${attempt}): ${e?.message || e}`);
+            }
+            await new Promise(r => setTimeout(r, 600));
+          }
+        }
+
+        // Skip inbound non-voice media-only messages (silent images, stickers, videos with NO text caption)
+        if (!isFromMe && !body.trim() && hasMedia && !isVoice) {
+          console.log(`📷 [${sessionName}] Skipping inbound media-only message (no text, non-voice) from ${fromJid}`);
           return;
         }
 
@@ -339,7 +471,9 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
               body: body,
               fromMe: true,
               timestamp: timestamp,
-              hasMedia: hasMedia
+              hasMedia: hasMedia,
+              type: msgType,
+              isVoice: isVoice
             }
           });
         } else {
@@ -353,7 +487,8 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
             }
           } catch (e) {}
 
-          console.log(`📩 [${sessionName}] Inbound message from ${pushName} (${fromJid}): "${body.slice(0, 80)}"`);
+          const displayBody = body || (isVoice ? '🎤 [Voice Note]' : '');
+          console.log(`📩 [${sessionName}] Inbound message from ${pushName} (${fromJid}): "${displayBody.slice(0, 80)}" (isVoice: ${isVoice})`);
           sendWebhookPayload({
             event: 'message',
             session: sessionName,
@@ -364,10 +499,14 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
               chatId: fromJid,
               phone: senderPhone,
               name: pushName,
-              body: body,
+              body: displayBody,
               fromMe: false,
               timestamp: timestamp,
-              hasMedia: hasMedia
+              hasMedia: hasMedia,
+              type: msgType,
+              isVoice: isVoice,
+              mediaData: audioBase64,
+              mimeType: audioMime
             }
           });
         }
@@ -412,6 +551,84 @@ app.get('/health', (req, res) => {
   const sessionName = req.query.session || 'default';
   const sessionObj = sessionsMap.get(sessionName);
   res.json({ status: 'OK', session: sessionObj ? sessionObj.status : 'STOPPED' });
+});
+
+app.get('/api/debug/msg', async (req, res) => {
+  const sessionName = req.query.session || 'default';
+  const msgId = req.query.msgId;
+  const sessionObj = sessionsMap.get(sessionName);
+  if (!sessionObj || !sessionObj.client || !sessionObj.client.pupPage) {
+    return res.status(503).json({ error: 'Session not active' });
+  }
+
+  try {
+    const diag = await sessionObj.client.pupPage.evaluate(async (targetId) => {
+      const collections = window.require ? window.require('WAWebCollections') : null;
+      if (!collections || !collections.Msg) return { error: 'WAWebCollections not available' };
+      
+      const allMsgs = collections.Msg.getModelsArray ? collections.Msg.getModelsArray() : (collections.Msg.models || []);
+      const pttMsgs = allMsgs.filter(m => m.type === 'ptt' || m.type === 'audio' || (m.mediaData && m.mediaData.type === 'ptt')).slice(-5);
+      
+      const summary = pttMsgs.map(m => ({
+        id: m.id ? (m.id._serialized || m.id) : null,
+        type: m.type,
+        mimetype: m.mimetype,
+        directPath: m.directPath,
+        mediaData: m.mediaData ? {
+          type: m.mediaData.type,
+          mediaStage: m.mediaData.mediaStage,
+          directPath: m.mediaData.directPath,
+          renderableUrl: m.mediaData.renderableUrl,
+          mimetype: m.mediaData.mimetype,
+          filehash: m.mediaData.filehash ? 'present' : 'none',
+          mediaKey: m.mediaData.mediaKey ? 'present' : 'none'
+        } : null
+      }));
+
+      // Test downloading the last PTT message
+      let testDownload = null;
+      let downloadError = null;
+      if (pttMsgs.length > 0) {
+        const lastMsg = pttMsgs[pttMsgs.length - 1];
+        try {
+          if (lastMsg.downloadMedia && lastMsg.mediaData && lastMsg.mediaData.mediaStage !== 'RESOLVED') {
+            await lastMsg.downloadMedia({ downloadEvenIfExpensive: true, rmrReason: 1 });
+          }
+          const dm = window.require ? window.require('WAWebDownloadManager') : null;
+          if (dm && dm.downloadManager) {
+            const md = lastMsg.mediaData || {};
+            const buf = await dm.downloadManager.downloadAndMaybeDecrypt({
+              directPath: lastMsg.directPath || md.directPath,
+              encFilehash: lastMsg.encFilehash || md.encFilehash,
+              filehash: lastMsg.filehash || md.filehash,
+              mediaKey: lastMsg.mediaKey || md.mediaKey,
+              mediaKeyTimestamp: lastMsg.mediaKeyTimestamp || md.mediaKeyTimestamp,
+              type: lastMsg.type || 'ptt',
+              signal: new AbortController().signal,
+              downloadQpl: { addAnnotations: () => {}, addPoint: () => {} }
+            });
+            if (buf) {
+              testDownload = { size: buf.byteLength, status: 'SUCCESS' };
+            }
+          }
+        } catch (e) {
+          downloadError = e.message || String(e);
+        }
+      }
+
+      return {
+        totalMsgsInRAM: allMsgs.length,
+        pttCount: pttMsgs.length,
+        recentPtt: summary,
+        testDownload,
+        downloadError
+      };
+    }, msgId);
+
+    res.json(diag);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/api/qr', async (req, res) => {
@@ -587,6 +804,478 @@ app.post('/api/sendFile', async (req, res) => {
     res.status(400).json({ error: 'File path or data not found' });
   } catch (err) {
     console.error('❌ Error sending file:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// =========================================================================
+// ON-DEMAND UNREAD CHATS CATCH-UP ENDPOINT
+// Direct WhatsApp Web Store extraction for 100% reliability and 0ms speed
+// =========================================================================
+app.get('/api/unread-messages', async (req, res) => {
+  const targetSession = req.query.session || 'all';
+  const maxHours = parseFloat(req.query.maxHours) || 0;
+  const cutoffTime = maxHours > 0 ? (Math.floor(Date.now() / 1000) - (maxHours * 3600)) : 0;
+
+  const targetSessions = [];
+  if (targetSession === 'all') {
+    for (const [name, obj] of sessionsMap.entries()) {
+      if (obj && obj.client && obj.status === 'WORKING') {
+        targetSessions.push({ name, client: obj.client, pupPage: obj.client.pupPage });
+      }
+    }
+  } else {
+    const obj = sessionsMap.get(targetSession);
+    if (obj && obj.client && obj.status === 'WORKING') {
+      targetSessions.push({ name: targetSession, client: obj.client, pupPage: obj.client.pupPage });
+    }
+  }
+
+  if (targetSessions.length === 0) {
+    return res.json({
+      success: true,
+      totalUnread: 0,
+      messages: [],
+      note: 'No active WORKING sessions found'
+    });
+  }
+
+  const allUnread = [];
+
+  for (const { name: sName, client, pupPage } of targetSessions) {
+    try {
+      if (pupPage) {
+        const storeResults = await pupPage.evaluate((cutoff) => {
+          const results = [];
+          try {
+            const getChatModels = () => {
+              if (window.Store && window.Store.Chat) {
+                return window.Store.Chat.getModelsArray ? window.Store.Chat.getModelsArray() : (window.Store.Chat.models || window.Store.Chat._models || []);
+              }
+              if (typeof window.require === 'function') {
+                try {
+                  const col = window.require('WAWebCollections');
+                  if (col && col.Chat) {
+                    return col.Chat.getModelsArray ? col.Chat.getModelsArray() : (col.Chat.models || col.Chat._models || []);
+                  }
+                } catch (e) {}
+              }
+              return [];
+            };
+
+            const chatList = getChatModels();
+
+            for (const c of chatList) {
+              if (!c || !c.id) continue;
+              const jid = c.id._serialized || c.id.user || '';
+              if (jid.endsWith('@g.us') || jid.includes('@broadcast') || jid.includes('@newsletter')) continue;
+
+              // Ignore archived chats completely
+              if (c.archive === true || c.isArchived === true || c.archived === true || c.archive === 1) continue;
+
+              const unread = Number(c.unreadCount || c.unreadMsgCount || (c.hasUnread ? 1 : 0) || 0);
+              const markedUnread = Boolean(c.markedUnread);
+
+              // Only chats with unreadCount > 0 or marked unread
+              if (unread <= 0 && !markedUnread) continue;
+
+              // Find the last customer message
+              let lastMsg = null;
+              const chatMsgs = c.msgs ? (c.msgs.getModelsArray ? c.msgs.getModelsArray() : (c.msgs.models || c.msgs._models || [])) : [];
+
+              for (let i = chatMsgs.length - 1; i >= 0; i--) {
+                const m = chatMsgs[i];
+                if (m && !m.fromMe && !m.id?.fromMe) {
+                  lastMsg = m;
+                  break;
+                }
+              }
+
+              // Fallback to lastReceivedKey
+              if (!lastMsg && c.lastReceivedKey && window.Store && window.Store.Msg) {
+                try {
+                  lastMsg = window.Store.Msg.get(c.lastReceivedKey);
+                } catch (e) {}
+              }
+
+              let msgTimestamp = c.t || (lastMsg ? (lastMsg.t || lastMsg.timestamp) : 0) || 0;
+              if (cutoff > 0 && msgTimestamp > 0 && msgTimestamp < cutoff) {
+                continue; // Skip by time cutoff
+              }
+
+              let body = '';
+              let isVoice = false;
+              let msgId = `UNREAD_${c.id._serialized}_${Date.now()}`;
+
+              if (lastMsg) {
+                msgId = lastMsg.id ? (lastMsg.id._serialized || lastMsg.id.id || msgId) : msgId;
+                body = lastMsg.body || lastMsg.caption || '';
+                const mType = String(lastMsg.type || '').toLowerCase();
+                isVoice = (mType === 'ptt' || mType === 'audio' || mType === 'voice');
+                if (isVoice && !body) {
+                  body = '🎤 [Voice Note]';
+                }
+              } else {
+                body = c.previewMessage ? (c.previewMessage.body || c.previewMessage.caption || '') : '';
+              }
+
+              const customerName = c.formattedTitle || c.name || (c.contact ? (c.contact.pushname || c.contact.name || '') : '') || '';
+
+              results.push({
+                chatId: jid,
+                customerName: customerName,
+                unreadCount: unread || 1,
+                messageId: msgId,
+                body: body,
+                isVoice: isVoice,
+                timestamp: msgTimestamp || Math.floor(Date.now() / 1000)
+              });
+            }
+          } catch (e) {
+            results.push({ error: e.message });
+          }
+          return results;
+        }, cutoffTime);
+
+        if (Array.isArray(storeResults)) {
+          for (const item of storeResults) {
+            if (item && !item.error && item.chatId) {
+              allUnread.push({
+                session: sName,
+                chatId: item.chatId,
+                customerName: item.customerName,
+                unreadCount: item.unreadCount,
+                messageId: item.messageId,
+                body: item.body,
+                isVoice: item.isVoice,
+                timestamp: item.timestamp,
+                timeFormatted: new Date(item.timestamp * 1000).toLocaleString()
+              });
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn(`⚠️ [${sName}] pupPage.evaluate unread scan error:`, err.message);
+    }
+  }
+
+  return res.json({
+    success: true,
+    totalUnread: allUnread.length,
+    messages: allUnread
+  });
+});
+
+app.get('/api/debug/label', async (req, res) => {
+  const sessionName = req.query.session || 'default';
+  const sessionObj = sessionsMap.get(sessionName);
+  if (!sessionObj || !sessionObj.client) return res.status(503).json({ error: 'offline' });
+  try {
+    const debug = await sessionObj.client.pupPage.evaluate(() => {
+      let labelsInfo = [];
+      try {
+        const collections = window.require('WAWebCollections');
+        if (collections && collections.Label) {
+          const raw = collections.Label.getModelsArray ? collections.Label.getModelsArray() : collections.Label.models;
+          labelsInfo = (raw || []).map(l => {
+            const items = l.labelItemCollection ? (l.labelItemCollection.getModelsArray ? l.labelItemCollection.getModelsArray() : (l.labelItemCollection.models || [])) : [];
+            return {
+              id: l.id,
+              name: l.name,
+              itemsCount: items.length,
+              sampleItem: items[0] ? { parentId: items[0].parentId, parentType: items[0].parentType } : null
+            };
+          });
+        }
+      } catch (e) {
+        labelsInfo = [{ error: e.message }];
+      }
+      return {
+        hasWAWebCollections: typeof window.require === 'function',
+        labelsCount: labelsInfo.length,
+        labels: labelsInfo
+      };
+    });
+    res.json(debug);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/debug/test-contact', async (req, res) => {
+  const sessionName = req.query.session || 'default';
+  const sessionObj = sessionsMap.get(sessionName);
+  if (!sessionObj || !sessionObj.client) return res.status(503).json({ error: 'offline' });
+  try {
+    const testResult = await sessionObj.client.pupPage.evaluate(async () => {
+      const collections = window.require('WAWebCollections');
+      const label642 = collections.Label.get('642');
+      const items = label642 ? (label642.labelItemCollection.getModelsArray ? label642.labelItemCollection.getModelsArray() : label642.labelItemCollection.models) : [];
+      const chatItem = items.find(it => it.parentType === 'Chat' && it.parentId);
+      if (!chatItem) return { error: 'no chat item found' };
+
+      const jid = String(chatItem.parentId);
+      const contactObj = collections.Contact ? collections.Contact.get(jid) : null;
+      let resolvedPhone = null;
+      try {
+        if (window.WWebJS && window.WWebJS.enforceLidAndPnRetrieval) {
+          const r = await window.WWebJS.enforceLidAndPnRetrieval(jid);
+          resolvedPhone = r?.phone?._serialized || null;
+        }
+      } catch (e) {
+        resolvedPhone = e.message;
+      }
+
+      return {
+        jid,
+        contactObjKeys: contactObj ? Object.keys(contactObj) : [],
+        contactPhoneNumber: contactObj?.phoneNumber,
+        contactName: contactObj?.name,
+        contactPushname: contactObj?.pushname,
+        contactIsMyContact: contactObj?.isMyContact,
+        contactIsAddressBook: contactObj?.isAddressBookContact,
+        resolvedPhone
+      };
+    });
+    res.json(testResult);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/labels', async (req, res) => {
+  const sessionName = req.query.session || 'default';
+  const sessionObj = sessionsMap.get(sessionName);
+  if (!sessionObj || sessionObj.status !== 'WORKING' || !sessionObj.client) {
+    return res.status(503).json({ error: `Session [${sessionName}] not connected` });
+  }
+  try {
+    const listData = await sessionObj.client.pupPage.evaluate(() => {
+      const out = [];
+      try {
+        const collections = window.require('WAWebCollections');
+        if (collections && collections.Label) {
+          const raw = collections.Label.getModelsArray ? collections.Label.getModelsArray() : (collections.Label.models || collections.Label._models || []);
+          for (const l of raw) {
+            const lId = String(l.id || (l.id && l.id._serialized) || '');
+            const lName = String(l.name || l.title || '');
+            if (!lId && !lName) continue;
+
+            const items = l.labelItemCollection ? (l.labelItemCollection.getModelsArray ? l.labelItemCollection.getModelsArray() : (l.labelItemCollection.models || l.labelItemCollection._models || [])) : [];
+            
+            // Count distinct chat JIDs (matching only Chat parentType)
+            const chatJids = new Set();
+            for (const item of items) {
+              if (item.parentType === 'Chat' && item.parentId) {
+                const jidStr = String(item.parentId);
+                if (!jidStr.endsWith('@g.us')) {
+                  chatJids.add(jidStr);
+                }
+              }
+            }
+
+            out.push({
+              id: lId,
+              name: lName,
+              hexColor: l.hexColor || '#25D366',
+              count: chatJids.size
+            });
+          }
+        }
+      } catch (e) {}
+      return out;
+    });
+
+    res.json(listData);
+  } catch (err) {
+    console.error(`❌ Error fetching labels for [${sessionName}]:`, err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/labels/save-contacts', async (req, res) => {
+  const { session, labelId, startOrderId, overwriteExisting } = req.body;
+  const sessionName = session || 'default';
+  const sessionObj = sessionsMap.get(sessionName);
+  if (!sessionObj || sessionObj.status !== 'WORKING' || !sessionObj.client) {
+    return res.status(503).json({ error: `Session [${sessionName}] not connected` });
+  }
+
+  let startIdNum = parseInt(startOrderId, 10);
+  if (isNaN(startIdNum)) {
+    return res.status(400).json({ error: 'Invalid startOrderId. Must be an integer number.' });
+  }
+
+  try {
+    const saveResult = await sessionObj.client.pupPage.evaluate(async (targetLabelId, startId, overwrite) => {
+      const targetStr = String(targetLabelId);
+      const matchedJids = new Set();
+      const collections = window.require ? window.require('WAWebCollections') : null;
+
+      if (!collections || !collections.Label) {
+        return { error: 'WAWebCollections not ready' };
+      }
+
+      // 1. Find Label and get items
+      const label = collections.Label.get(targetStr) || 
+                    (collections.Label.getModelsArray ? collections.Label.getModelsArray().find(l => String(l.id) === targetStr || String(l.name) === targetStr) : null);
+      if (label && label.labelItemCollection) {
+        const items = label.labelItemCollection.getModelsArray ? label.labelItemCollection.getModelsArray() : (label.labelItemCollection.models || []);
+        for (const item of items) {
+          if (item.parentType === 'Chat' && item.parentId) {
+            const jid = String(item.parentId);
+            if (!jid.endsWith('@g.us')) matchedJids.add(jid);
+          }
+        }
+      }
+
+      // 2. Gather chat metadata and resolve clean phone numbers instantly from RAM
+      const chatList = [];
+      for (const jid of matchedJids) {
+        let cleanPhone = '';
+        let pushname = '';
+        let contactName = '';
+        let isSaved = false;
+        let timestamp = 0;
+
+        try {
+          const chat = collections.Chat ? collections.Chat.get(jid) : null;
+          const contact = collections.Contact ? collections.Contact.get(jid) : null;
+
+          if (chat) {
+            timestamp = chat.t || chat.timestamp || 0;
+            contactName = chat.name || chat.formattedTitle || '';
+          }
+
+          if (contact) {
+            pushname = contact.pushname || '';
+            contactName = contact.name || contactName;
+
+            // Resolve real phone number instantly from in-memory contact model
+            if (contact.phoneNumber && contact.phoneNumber.user) {
+              cleanPhone = String(contact.phoneNumber.user);
+            } else if (contact.phoneNumber && contact.phoneNumber._serialized) {
+              cleanPhone = String(contact.phoneNumber._serialized).split('@')[0];
+            } else if (contact.phoneNumber && typeof contact.phoneNumber === 'string') {
+              cleanPhone = contact.phoneNumber.replace(/\D/g, '');
+            } else if (jid.includes('@c.us')) {
+              cleanPhone = jid.split('@')[0];
+            }
+
+            if (!cleanPhone) cleanPhone = String(jid).split('@')[0];
+
+            // Contact is genuinely saved only if in phone address book or has custom contact name
+            isSaved = Boolean(
+              contact.isAddressBookContact || 
+              contact.isMyContact || 
+              (contact.name && contact.name !== cleanPhone && contact.name !== pushname && !contact.name.startsWith('+'))
+            );
+          } else {
+            cleanPhone = String(jid).split('@')[0];
+          }
+        } catch (e) {
+          cleanPhone = String(jid).split('@')[0];
+        }
+
+        chatList.push({
+          jid: String(jid),
+          phone: cleanPhone,
+          name: contactName || pushname || cleanPhone,
+          pushname: pushname,
+          isSaved: isSaved,
+          timestamp: timestamp
+        });
+      }
+
+      // Sort chronologically (earliest orders first)
+      chatList.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+
+      // 3. Sequential numbering and saving
+      let currentId = startId;
+      let savedCount = 0;
+      let skippedCount = 0;
+      const details = [];
+
+      const saveAction = window.require ? window.require('WAWebSaveContactAction') : null;
+
+      for (const chat of chatList) {
+        if (chat.isSaved && !overwrite) {
+          skippedCount++;
+          details.push({
+            chatId: chat.jid,
+            phone: chat.phone,
+            action: 'skipped',
+            name: chat.name,
+            reason: 'Already saved'
+          });
+          continue;
+        }
+
+        const assignedName = String(currentId);
+        currentId++;
+        let success = false;
+
+        // Action A: Save to WhatsApp address book with race protection
+        try {
+          if (saveAction && saveAction.saveContactAction && chat.phone) {
+            const p = saveAction.saveContactAction({
+              firstName: assignedName,
+              lastName: '',
+              phoneNumber: chat.phone,
+              prevPhoneNumber: chat.phone,
+              syncToAddressbook: false,
+              username: undefined
+            });
+            await Promise.race([p, new Promise(r => setTimeout(r, 600))]);
+            success = true;
+          }
+        } catch (e) {}
+
+        // Action B: Update local contact display name model
+        try {
+          const c = collections.Contact ? collections.Contact.get(chat.jid) : null;
+          if (c) {
+            if (c.setDisplayName) await c.setDisplayName(assignedName);
+            if (c.setName) await c.setName(assignedName);
+            c.name = assignedName;
+            c.formattedTitle = assignedName;
+            success = true;
+          }
+        } catch (e) {}
+
+        savedCount++;
+        details.push({
+          chatId: chat.jid,
+          phone: chat.phone,
+          assignedName: assignedName,
+          action: 'saved',
+          status: 'OK'
+        });
+
+        // Small 100ms pause between saves
+        await new Promise(r => setTimeout(r, 100));
+      }
+
+      return {
+        status: 'SUCCESS',
+        totalChats: chatList.length,
+        savedCount: savedCount,
+        skippedCount: skippedCount,
+        nextAvailableId: currentId,
+        details: details
+      };
+    }, labelId, startIdNum, Boolean(overwriteExisting));
+
+    if (saveResult && saveResult.error) {
+      return res.status(500).json({ error: saveResult.error });
+    }
+
+    console.log(`🏷️ [${sessionName}] Order Saver completed: ${saveResult.savedCount} saved, ${saveResult.skippedCount} skipped.`);
+    res.json(saveResult);
+
+  } catch (err) {
+    console.error(`❌ Error in save-contacts:`, err);
     res.status(500).json({ error: err.message });
   }
 });

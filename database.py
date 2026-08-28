@@ -123,6 +123,11 @@ def init_db():
     );
     """)
 
+    # Performance Indices
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_inbound_received ON inbound_queue(received_at DESC);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_inbound_status ON inbound_queue(status);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_send_log_sent ON send_log(sent_at);")
+
     # Seed default system settings
     default_settings = [
         ('ai_fallback_enabled', '0'),
@@ -145,7 +150,8 @@ def init_db():
         ('human_takeover_enabled', '1'),
         ('human_takeover_minutes', '5'),
         ('ai_master_enabled', '0'),
-        ('ai_operating_mode', 'hybrid')
+        ('ai_operating_mode', 'hybrid'),
+        ('ai_voice_enabled', '1')
     ]
     
     for key, val in default_settings:

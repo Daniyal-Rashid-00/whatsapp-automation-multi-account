@@ -1,8 +1,8 @@
-﻿import threading
+import threading
 import asyncio
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QComboBox, QLineEdit, QTextEdit, QPushButton, QMessageBox, QFrame
+    QComboBox, QLineEdit, QTextEdit, QPushButton, QMessageBox, QFrame, QScrollArea
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from database import get_setting, set_setting
@@ -21,9 +21,44 @@ class AIPage(QWidget):
 
         self.test_result_signal.connect(self._on_test_result)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(16)
+        # Root layout holding the responsive scroll area
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        # Smooth Scroll Area to ensure 100% screen responsiveness on any resolution
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("""
+            QScrollArea {
+                background-color: transparent;
+                border: none;
+            }
+            QScrollBar:vertical {
+                background: #0D1117;
+                width: 8px;
+                margin: 0px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical {
+                background: #30363D;
+                min-height: 24px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #58A6FF;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+        """)
+
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(20, 20, 20, 20)
+        content_layout.setSpacing(14)
 
         # Page Header
         hdr_layout = QHBoxLayout()
@@ -31,14 +66,14 @@ class AIPage(QWidget):
         title.setObjectName("pageTitle")
         hdr_layout.addWidget(title)
         hdr_layout.addStretch()
-        layout.addLayout(hdr_layout)
+        content_layout.addLayout(hdr_layout)
 
         # Main Card Container
         card = QFrame()
         card.setObjectName("cardFrame")
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(18, 18, 18, 18)
-        card_layout.setSpacing(14)
+        card_layout.setSpacing(12)
 
         # 1. AI Engine Master Switch & Mode Control Row
         row_master = QHBoxLayout()
@@ -63,6 +98,30 @@ class AIPage(QWidget):
         row_master.addStretch()
 
         card_layout.addLayout(row_master)
+
+        # 1b. Voice Note AI Auto-Reply Switch
+        row_voice = QHBoxLayout()
+        row_voice.setSpacing(14)
+
+        is_voice_on = get_setting("ai_voice_enabled", "1") == "1"
+        self.tog_voice = ToggleSwitch(checked=is_voice_on)
+        self.tog_voice.stateChanged.connect(self._on_voice_toggled)
+        row_voice.addWidget(self.tog_voice)
+
+        v_v_title = QVBoxLayout()
+        v_v_title.setSpacing(2)
+        v_status = "ENABLED (ON)" if is_voice_on else "DISABLED (OFF)"
+        v_color = "#22C55E" if is_voice_on else "#EF4444"
+        self.lbl_v_title = QLabel(f"Voice Note AI Auto-Replies: {v_status}")
+        self.lbl_v_title.setStyleSheet(f"font-weight: 700; font-size: 13px; color: {v_color};")
+        v_v_title.addWidget(self.lbl_v_title)
+        lbl_v_sub = QLabel("Automatically listen to customer voice messages (.ogg) and send instant text replies.")
+        lbl_v_sub.setStyleSheet("font-size: 11px; color: #8B949E;")
+        v_v_title.addWidget(lbl_v_sub)
+        row_voice.addLayout(v_v_title)
+        row_voice.addStretch()
+
+        card_layout.addLayout(row_voice)
 
         # Divider
         div_ai = QFrame()
@@ -98,40 +157,62 @@ class AIPage(QWidget):
 
         card_layout.addLayout(row_mode)
 
-        # 3. Provider & Model Row
-        row1 = QHBoxLayout()
-        row1.setSpacing(14)
+        # 3. Model Configuration & Provider Overrides
+        row1 = QVBoxLayout()
+        row1.setSpacing(8)
 
-        v1 = QVBoxLayout()
-        v1.setSpacing(4)
-        lbl_prov = QLabel("AI PROVIDER SERVICE:")
-        lbl_prov.setStyleSheet("font-weight: 600; font-size: 11px; color: #8B949E;")
-        v1.addWidget(lbl_prov)
-        self.cmb_provider = QComboBox()
-        self.cmb_provider.addItems(["Gemini", "OpenRouter"])
-        self.cmb_provider.currentTextChanged.connect(self._save_settings)
-        v1.addWidget(self.cmb_provider)
-        row1.addLayout(v1, stretch=1)
+        lbl_models_title = QLabel("AI MODEL CONFIGURATION (Per-Provider Overrides):")
+        lbl_models_title.setStyleSheet("font-weight: 700; font-size: 11px; color: #8B949E; letter-spacing: 0.5px;")
+        row1.addWidget(lbl_models_title)
 
-        v2 = QVBoxLayout()
-        v2.setSpacing(4)
-        lbl_mod = QLabel("MODEL ID OVERRIDE:")
-        lbl_mod.setStyleSheet("font-weight: 600; font-size: 11px; color: #8B949E;")
-        v2.addWidget(lbl_mod)
+        row_models_grid = QHBoxLayout()
+        row_models_grid.setSpacing(10)
+
+        # Gemini Model
+        v_m1 = QVBoxLayout()
+        v_m1.setSpacing(3)
+        lbl_m1 = QLabel("GEMINI MODEL (Slots 1-3):")
+        lbl_m1.setStyleSheet("font-size: 10px; font-weight: 600; color: #8B949E;")
+        v_m1.addWidget(lbl_m1)
         self.txt_model_id = QLineEdit()
-        self.txt_model_id.setPlaceholderText("e.g. gemini-3.5-flash-lite (Recommended for speed & free tier)")
+        self.txt_model_id.setPlaceholderText("gemini-3.5-flash-lite")
         self.txt_model_id.editingFinished.connect(self._save_settings)
-        v2.addWidget(self.txt_model_id)
-        row1.addLayout(v2, stretch=2)
+        v_m1.addWidget(self.txt_model_id)
+        row_models_grid.addLayout(v_m1, stretch=1)
 
+        # OpenRouter Model (Slot 4)
+        v_m2 = QVBoxLayout()
+        v_m2.setSpacing(3)
+        lbl_m2 = QLabel("OPENROUTER MODEL (Slot 4):")
+        lbl_m2.setStyleSheet("font-size: 10px; font-weight: 600; color: #8B949E;")
+        v_m2.addWidget(lbl_m2)
+        self.txt_model_openrouter = QLineEdit()
+        self.txt_model_openrouter.setPlaceholderText("nvidia/nemotron-3-super-120b-a12b:free")
+        self.txt_model_openrouter.editingFinished.connect(self._save_settings)
+        v_m2.addWidget(self.txt_model_openrouter)
+        row_models_grid.addLayout(v_m2, stretch=1)
+
+        # Groq Model (Slot 5)
+        v_m3 = QVBoxLayout()
+        v_m3.setSpacing(3)
+        lbl_m3 = QLabel("GROQ MODEL (Slot 5):")
+        lbl_m3.setStyleSheet("font-size: 10px; font-weight: 600; color: #8B949E;")
+        v_m3.addWidget(lbl_m3)
+        self.txt_model_groq = QLineEdit()
+        self.txt_model_groq.setPlaceholderText("openai/gpt-oss-20b")
+        self.txt_model_groq.editingFinished.connect(self._save_settings)
+        v_m3.addWidget(self.txt_model_groq)
+        row_models_grid.addLayout(v_m3, stretch=1)
+
+        row1.addLayout(row_models_grid)
         card_layout.addLayout(row1)
 
-        # 4. Multi-Key Pool Section
+        # 4. Multi-Key Pool Section (5-Slot Smart Multi-Provider Keychain)
         v_key_pool = QVBoxLayout()
         v_key_pool.setSpacing(6)
 
         hdr_keys = QHBoxLayout()
-        lbl_key_title = QLabel("AI API KEY ROTATION POOL (Keychain Vault):")
+        lbl_key_title = QLabel("AI MULTI-PROVIDER KEY VAULT (5-Slot Auto-Failover):")
         lbl_key_title.setStyleSheet("font-weight: 700; font-size: 11px; color: #8B949E; letter-spacing: 0.5px;")
         hdr_keys.addWidget(lbl_key_title)
 
@@ -140,38 +221,53 @@ class AIPage(QWidget):
         hdr_keys.addWidget(self.lbl_pool_status)
         hdr_keys.addStretch()
 
-        self.btn_test_conn = QPushButton("⚡ Test Connection")
+        self.btn_test_conn = QPushButton("⚡ Test All Connections")
         self.btn_test_conn.setObjectName("btnSecondary")
         self.btn_test_conn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_test_conn.setFixedHeight(28)
-        self.btn_test_conn.clicked.connect(self._test_connection_clicked)
+        self.btn_test_conn.clicked.connect(self._test_all_connections_clicked)
         hdr_keys.addWidget(self.btn_test_conn)
 
         v_key_pool.addLayout(hdr_keys)
 
-        # Key Slot 1 (Primary)
+        # Key Slot 1 (Gemini Primary)
         self.txt_api_key_1 = QLineEdit()
         self.txt_api_key_1.setEchoMode(QLineEdit.EchoMode.Password)
-        self.txt_api_key_1.setPlaceholderText("Primary API Key (Required, e.g. AIzaSy...)")
-        row_k1 = self._build_key_row(self.txt_api_key_1, "nexus_ai_key", "Key 1 (Primary)")
+        self.txt_api_key_1.setPlaceholderText("Gemini Key 1 (AIzaSy...) — Tier 1 Primary")
+        row_k1 = self._build_key_row(self.txt_api_key_1, "nexus_ai_key", "Gemini Key 1")
         v_key_pool.addLayout(row_k1)
 
-        # Key Slot 2 (Secondary)
+        # Key Slot 2 (Gemini Secondary)
         self.txt_api_key_2 = QLineEdit()
         self.txt_api_key_2.setEchoMode(QLineEdit.EchoMode.Password)
-        self.txt_api_key_2.setPlaceholderText("Secondary API Key (Optional — for high-throughput round robin)")
-        row_k2 = self._build_key_row(self.txt_api_key_2, "nexus_ai_key_2", "Key 2 (Optional)")
+        self.txt_api_key_2.setPlaceholderText("Gemini Key 2 (AIzaSy...) — Tier 1 Round-Robin")
+        row_k2 = self._build_key_row(self.txt_api_key_2, "nexus_ai_key_2", "Gemini Key 2")
         v_key_pool.addLayout(row_k2)
 
-        # Key Slot 3 (Tertiary)
+        # Key Slot 3 (Gemini Tertiary)
         self.txt_api_key_3 = QLineEdit()
         self.txt_api_key_3.setEchoMode(QLineEdit.EchoMode.Password)
-        self.txt_api_key_3.setPlaceholderText("Tertiary API Key (Optional — for maximum concurrency)")
-        row_k3 = self._build_key_row(self.txt_api_key_3, "nexus_ai_key_3", "Key 3 (Optional)")
+        self.txt_api_key_3.setPlaceholderText("Gemini Key 3 (AIzaSy...) — Tier 1 Round-Robin")
+        row_k3 = self._build_key_row(self.txt_api_key_3, "nexus_ai_key_3", "Gemini Key 3")
         v_key_pool.addLayout(row_k3)
 
+        # Key Slot 4 (OpenRouter Failover)
+        self.txt_api_key_4 = QLineEdit()
+        self.txt_api_key_4.setEchoMode(QLineEdit.EchoMode.Password)
+        self.txt_api_key_4.setPlaceholderText("OpenRouter Key (sk-or-v1-...) — Tier 2 Failover")
+        row_k4 = self._build_key_row(self.txt_api_key_4, "nexus_openrouter_key", "OpenRouter")
+        v_key_pool.addLayout(row_k4)
+
+        # Key Slot 5 (Groq Cloud Voice & Failover)
+        self.txt_api_key_5 = QLineEdit()
+        self.txt_api_key_5.setEchoMode(QLineEdit.EchoMode.Password)
+        self.txt_api_key_5.setPlaceholderText("Groq Key (gsk_...) — Free Whisper V3 Voice & Tier 3 Failover")
+        row_k5 = self._build_key_row(self.txt_api_key_5, "nexus_groq_key", "Groq Cloud")
+        v_key_pool.addLayout(row_k5)
+
         self.lbl_test_result = QLabel("")
-        self.lbl_test_result.setStyleSheet("font-size: 11px; padding: 2px;")
+        self.lbl_test_result.setWordWrap(True)
+        self.lbl_test_result.setStyleSheet("font-size: 11px; padding: 6px; border-radius: 4px; background: rgba(22, 27, 34, 0.7); line-height: 1.4;")
         v_key_pool.addWidget(self.lbl_test_result)
 
         card_layout.addLayout(v_key_pool)
@@ -193,21 +289,25 @@ class AIPage(QWidget):
             "• Delivery Time: 2 to 4 working days.\n"
             "• Payment Method: Cash on Delivery (COD) available for all non-customized items.\n"
         )
-        self.txt_system_context.setMinimumHeight(180)
+        self.txt_system_context.setMinimumHeight(130)
+        self.txt_system_context.setMaximumHeight(220)
         v_ctx.addWidget(self.txt_system_context)
 
         card_layout.addLayout(v_ctx)
 
         # Save Button
-        btn_save_all = QPushButton("Save AI Configuration & Knowledge Base")
+        btn_save_all = QPushButton("Save AI Configuration & Key Vault")
         btn_save_all.setObjectName("btnPrimary")
         btn_save_all.setMinimumHeight(38)
         btn_save_all.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_save_all.clicked.connect(self._save_all_ai_settings)
         card_layout.addWidget(btn_save_all)
 
-        layout.addWidget(card)
-        layout.addStretch()
+        content_layout.addWidget(card)
+        content_layout.addStretch()
+
+        scroll.setWidget(content_widget)
+        root_layout.addWidget(scroll)
 
         self.load_settings()
 
@@ -216,7 +316,7 @@ class AIPage(QWidget):
         row.setSpacing(8)
 
         lbl = QLabel(label_text + ":")
-        lbl.setFixedWidth(100)
+        lbl.setFixedWidth(110)
         lbl.setStyleSheet("font-size: 11px; color: #8B949E; font-weight: 600;")
         row.addWidget(lbl)
 
@@ -258,7 +358,7 @@ class AIPage(QWidget):
     def _update_pool_status_badge(self):
         active_count = key_pool.get_active_count()
         if active_count >= 2:
-            self.lbl_pool_status.setText(f"🟢 {active_count} Keys Active (Multi-Key Round-Robin Enabled)")
+            self.lbl_pool_status.setText(f"🟢 {active_count} of 5 Keys Active (Multi-Tier Auto-Failover Enabled)")
             self.lbl_pool_status.setStyleSheet("font-size: 11px; font-weight: 700; color: #22C55E;")
         elif active_count == 1:
             self.lbl_pool_status.setText("🟢 1 Key Active (Single Key Mode)")
@@ -266,6 +366,16 @@ class AIPage(QWidget):
         else:
             self.lbl_pool_status.setText("🔴 0 Keys Configured (AI Disabled)")
             self.lbl_pool_status.setStyleSheet("font-size: 11px; font-weight: 700; color: #EF4444;")
+
+    def _on_voice_toggled(self, checked: bool):
+        is_on = "1" if checked else "0"
+        set_setting("ai_voice_enabled", is_on)
+        if checked:
+            self.lbl_v_title.setText("Voice Note AI Auto-Replies: ENABLED (ON)")
+            self.lbl_v_title.setStyleSheet("font-weight: 700; font-size: 13px; color: #22C55E;")
+        else:
+            self.lbl_v_title.setText("Voice Note AI Auto-Replies: DISABLED (OFF)")
+            self.lbl_v_title.setStyleSheet("font-weight: 700; font-size: 13px; color: #EF4444;")
 
     def _on_ai_master_toggled(self, checked: bool):
         is_master = "1" if checked else "0"
@@ -289,6 +399,15 @@ class AIPage(QWidget):
         self.lbl_m_title.setText(f"AI Engine Master Switch: {status_text}")
         self.lbl_m_title.setStyleSheet(f"font-weight: 700; font-size: 14px; color: {status_color};")
 
+        voice_on = get_setting("ai_voice_enabled", "1") == "1"
+        self.tog_voice.blockSignals(True)
+        self.tog_voice.setChecked(voice_on)
+        self.tog_voice.blockSignals(False)
+        v_status = "ENABLED (ON)" if voice_on else "DISABLED (OFF)"
+        v_color = "#22C55E" if voice_on else "#EF4444"
+        self.lbl_v_title.setText(f"Voice Note AI Auto-Replies: {v_status}")
+        self.lbl_v_title.setStyleSheet(f"font-weight: 700; font-size: 13px; color: {v_color};")
+
         op_mode = get_setting("ai_operating_mode", "hybrid")
         self.cmb_operating_mode.blockSignals(True)
         if op_mode == "ai_only":
@@ -297,23 +416,21 @@ class AIPage(QWidget):
             self.cmb_operating_mode.setCurrentIndex(0)
         self.cmb_operating_mode.blockSignals(False)
 
-        provider = get_setting("ai_provider", "gemini").lower()
-        self.cmb_provider.blockSignals(True)
-        for i in range(self.cmb_provider.count()):
-            if self.cmb_provider.itemText(i).lower() == provider:
-                self.cmb_provider.setCurrentIndex(i)
-                break
-        self.cmb_provider.blockSignals(False)
-
         model = get_setting("ai_model_name", "gemini-3.5-flash-lite")
         if model in ("gemini-1.5-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.1-flash-lite"):
             model = "gemini-3.5-flash-lite"
         self.txt_model_id.setText(model)
 
+        or_model = get_setting("openrouter_model_name", "nvidia/nemotron-3-super-120b-a12b:free")
+        self.txt_model_openrouter.setText(or_model)
+
+        groq_model = get_setting("groq_model_name", "openai/gpt-oss-20b")
+        self.txt_model_groq.setText(groq_model)
+
         context = get_setting("ai_system_context", "")
         self.txt_system_context.setText(context)
 
-        # Load Keys
+        # Load Keys (5 Slots)
         k1 = retrieve_secret("nexus_ai_key") or ""
         self.txt_api_key_1.setText(k1)
 
@@ -323,40 +440,76 @@ class AIPage(QWidget):
         k3 = retrieve_secret("nexus_ai_key_3") or ""
         self.txt_api_key_3.setText(k3)
 
+        k4 = retrieve_secret("nexus_openrouter_key") or ""
+        self.txt_api_key_4.setText(k4)
+
+        k5 = retrieve_secret("nexus_groq_key") or ""
+        self.txt_api_key_5.setText(k5)
+
         self._update_pool_status_badge()
 
-    def _test_connection_clicked(self):
-        primary_key = self.txt_api_key_1.text().strip() or retrieve_secret("nexus_ai_key") or ""
-        if not primary_key:
-            QMessageBox.warning(self, "No Key", "Please enter at least Primary Key (Key 1) to test connection.")
+    def _test_all_connections_clicked(self):
+        gemini_model = self.txt_model_id.text().strip() or "gemini-3.5-flash-lite"
+        or_model = self.txt_model_openrouter.text().strip() or "nvidia/nemotron-3-super-120b-a12b:free"
+        groq_model = self.txt_model_groq.text().strip() or "openai/gpt-oss-20b"
+
+        keys_to_test = [
+            ("Slot 1 (Gemini 1)", self.txt_api_key_1.text().strip() or retrieve_secret("nexus_ai_key") or "", gemini_model, "gemini"),
+            ("Slot 2 (Gemini 2)", self.txt_api_key_2.text().strip() or retrieve_secret("nexus_ai_key_2") or "", gemini_model, "gemini"),
+            ("Slot 3 (Gemini 3)", self.txt_api_key_3.text().strip() or retrieve_secret("nexus_ai_key_3") or "", gemini_model, "gemini"),
+            ("Slot 4 (OpenRouter)", self.txt_api_key_4.text().strip() or retrieve_secret("nexus_openrouter_key") or "", or_model, "openrouter"),
+            ("Slot 5 (Groq Cloud)", self.txt_api_key_5.text().strip() or retrieve_secret("nexus_groq_key") or "", groq_model, "groq"),
+        ]
+
+        active_tests = [t for t in keys_to_test if t[1]]
+        if not active_tests:
+            QMessageBox.warning(self, "No Keys Configured", "Please enter at least one API key before testing.")
             return
 
-        model = self.txt_model_id.text().strip() or "gemini-3.5-flash-lite"
-        provider = self.cmb_provider.currentText().lower()
-
         self.btn_test_conn.setEnabled(False)
-        self.lbl_test_result.setText("⏳ Testing AI connection...")
+        self.lbl_test_result.setText("⏳ Testing all configured API connections in parallel...")
         self.lbl_test_result.setStyleSheet("color: #F59E0B; font-weight: 600;")
 
         def worker():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            success, msg, latency = loop.run_until_complete(
-                test_ai_connection(primary_key, model, provider)
-            )
+            results = []
+            for name, key, model, prov in active_tests:
+                ok, msg, lat = loop.run_until_complete(test_ai_connection(key, model, prov))
+                results.append((name, ok, msg, lat))
             loop.close()
-            self.test_result_signal.emit(success, msg, latency)
+
+            # Format summary cleanly so it wraps nicely
+            lines = []
+            all_ok = True
+            for name, ok, msg, lat in results:
+                if ok:
+                    lines.append(f"🟢 {name}: OK ({lat:.2f}s)")
+                else:
+                    all_ok = False
+                    clean_err = msg.replace("\n", " ").strip()
+                    if "401" in clean_err:
+                        clean_err = "Project Suspended / Invalid Key (401)"
+                    elif "429" in clean_err:
+                        clean_err = "Rate Limited / Quota (429)"
+                    elif "404" in clean_err:
+                        clean_err = "Model Not Found (404)"
+                    elif len(clean_err) > 40:
+                        clean_err = clean_err[:40] + "..."
+                    lines.append(f"🔴 {name}: {clean_err}")
+            
+            summary_text = "\n".join(lines)
+            self.test_result_signal.emit(all_ok, summary_text, 0.0)
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_test_result(self, success: bool, msg: str, latency: float):
         self.btn_test_conn.setEnabled(True)
+        self.lbl_test_result.setText(msg)
         if success:
-            self.lbl_test_result.setText(f"✅ Connection verified ({latency:.2f}s latency)")
-            self.lbl_test_result.setStyleSheet("color: #22C55E; font-weight: 600;")
+            self.lbl_test_result.setStyleSheet("color: #22C55E; font-weight: 600; font-size: 11px; padding: 6px; border-radius: 4px; background: rgba(22, 27, 34, 0.8); line-height: 1.5;")
         else:
-            self.lbl_test_result.setText(f"❌ Connection failed: {msg}")
-            self.lbl_test_result.setStyleSheet("color: #EF4444; font-weight: 600;")
+            self.lbl_test_result.setStyleSheet("color: #F59E0B; font-weight: 600; font-size: 11px; padding: 6px; border-radius: 4px; background: rgba(22, 27, 34, 0.8); line-height: 1.5;")
 
     def _save_settings(self):
         is_master = "1" if self.tog_ai_master.isChecked() else "0"
@@ -365,14 +518,15 @@ class AIPage(QWidget):
 
         selected_mode = "ai_only" if self.cmb_operating_mode.currentIndex() == 1 else "hybrid"
         set_setting("ai_operating_mode", selected_mode)
-        set_setting("ai_provider", self.cmb_provider.currentText().lower())
         set_setting("ai_model_name", self.txt_model_id.text().strip() or "gemini-3.5-flash-lite")
+        set_setting("openrouter_model_name", self.txt_model_openrouter.text().strip() or "nvidia/nemotron-3-super-120b-a12b:free")
+        set_setting("groq_model_name", self.txt_model_groq.text().strip() or "openai/gpt-oss-20b")
 
     def _save_all_ai_settings(self):
         self._save_settings()
         set_setting("ai_system_context", self.txt_system_context.toPlainText().strip())
 
-        # Save any keys typed into fields
+        # Save all 5 key slots
         k1 = self.txt_api_key_1.text().strip()
         if k1:
             store_secret("nexus_ai_key", k1)
@@ -385,5 +539,14 @@ class AIPage(QWidget):
         if k3:
             store_secret("nexus_ai_key_3", k3)
 
+        k4 = self.txt_api_key_4.text().strip()
+        if k4:
+            store_secret("nexus_openrouter_key", k4)
+
+        k5 = self.txt_api_key_5.text().strip()
+        if k5:
+            store_secret("nexus_groq_key", k5)
+
         self._update_pool_status_badge()
-        QMessageBox.information(self, "Settings Saved", "AI Assistant configuration and Key Pool saved successfully!")
+        QMessageBox.information(self, "Vault Saved", "All 5 API key slots and AI configuration saved securely!")
+

@@ -104,8 +104,8 @@ def main():
     set_message_enqueued_callback(processor.notify_new_message)
     start_queue_worker_thread(processor)
 
-    # 4. Auto-start Baileys WhatsApp Engine
-    auto_start_engine()
+    # 4. Auto-start WhatsApp Engine in background (non-blocking for instant GUI launch)
+    threading.Thread(target=auto_start_engine, daemon=True).start()
 
     # 5. Kickstart all previously-linked sessions in background (non-blocking)
     threading.Thread(target=kickstart_all_sessions, daemon=True).start()

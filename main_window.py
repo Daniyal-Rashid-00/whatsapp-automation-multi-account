@@ -10,7 +10,9 @@ from ui.sidebar import SidebarNavWidget
 from ui.pages.dashboard_page import DashboardPage
 from ui.pages.rule_studio_page import RuleStudioPage
 from ui.pages.ai_page import AIPage
+from ui.pages.unread_catchup_page import UnreadCatchUpPage
 from ui.pages.accounts_page import AccountsPage
+from ui.pages.contact_saver_page import ContactSaverPage
 from ui.pages.settings_page import SettingsPage
 
 import database as db
@@ -55,7 +57,9 @@ class MainWindow(QMainWindow):
         self.page_dashboard = DashboardPage()
         self.page_rules = RuleStudioPage()
         self.page_ai = AIPage()
+        self.page_catchup = UnreadCatchUpPage()
         self.page_accounts = AccountsPage()
+        self.page_saver = ContactSaverPage()
         self.page_settings = SettingsPage()
 
         def wrap_scroll(widget: QWidget) -> QScrollArea:
@@ -68,17 +72,19 @@ class MainWindow(QMainWindow):
         self.stacked.addWidget(wrap_scroll(self.page_dashboard))   # Index 0
         self.stacked.addWidget(self.page_rules)                    # Index 1 (internal scroll)
         self.stacked.addWidget(wrap_scroll(self.page_ai))          # Index 2
-        self.stacked.addWidget(wrap_scroll(self.page_accounts))    # Index 3
-        self.stacked.addWidget(wrap_scroll(self.page_settings))    # Index 4
+        self.stacked.addWidget(self.page_catchup)                  # Index 3 (internal scroll)
+        self.stacked.addWidget(wrap_scroll(self.page_accounts))    # Index 4
+        self.stacked.addWidget(wrap_scroll(self.page_saver))       # Index 5
+        self.stacked.addWidget(wrap_scroll(self.page_settings))    # Index 6
 
         root_layout.addWidget(self.stacked, stretch=1)
 
         # Connect Rule Studio Signals
         self._connect_rule_signals()
 
-        # Live timer to refresh metrics and active activity log
+        # Live timer to refresh metrics and active activity log smoothly
         self.timer = QTimer(self)
-        self.timer.setInterval(1000)
+        self.timer.setInterval(2500)
         self.timer.timeout.connect(self._refresh_live_metrics)
         self.timer.start()
 
@@ -105,7 +111,7 @@ class MainWindow(QMainWindow):
         self.page_accounts.refresh_accounts_matrix()
 
         if status.upper() == "WORKING":
-            db.backup_session_keys(session_name)
+            threading.Thread(target=db.backup_session_keys, args=(session_name,), daemon=True).start()
 
     def _connect_rule_signals(self):
         editor = self.page_rules.rule_editor
@@ -135,7 +141,11 @@ class MainWindow(QMainWindow):
         elif index == 1:
             self.refresh_rules_matrix()
         elif index == 3:
+            self.page_catchup._refresh_accounts_dropdown()
+        elif index == 4:
             self.page_accounts.refresh_accounts_matrix()
+        elif index == 5:
+            self.page_saver.refresh_accounts()
 
     def _on_global_toggle_changed(self, enabled: bool):
         self.queue_processor.set_global_automation(enabled)

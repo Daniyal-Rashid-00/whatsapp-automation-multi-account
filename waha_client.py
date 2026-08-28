@@ -129,3 +129,21 @@ class WAHAClient:
                 return []
         except Exception:
             return []
+
+    async def get_unread_messages(self, session: str = "all", max_hours: float = 24.0) -> List[Dict[str, Any]]:
+        """
+        Fetches unread customer messages across active WhatsApp sessions within max_hours.
+        """
+        base_url = self._get_base_url()
+        url = f"{base_url}/api/unread-messages?session={session}&maxHours={max_hours}"
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(url, headers=self._get_headers())
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data.get("messages", [])
+                logger.warning(f"Failed to fetch unread messages: {resp.status_code} - {resp.text}")
+                return []
+        except Exception as e:
+            logger.error(f"Exception fetching unread messages from {url}: {e}")
+            return []

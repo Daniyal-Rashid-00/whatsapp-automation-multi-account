@@ -33,16 +33,18 @@ class SidebarNavWidget(QFrame):
         layout.addLayout(brand_layout)
         layout.addSpacing(20)
 
-        # Nav Buttons (Index 0: Dash, Index 1: Rules, Index 2: AI, Index 3: Accounts, Index 4: Settings)
+        # Nav Buttons (0: Dash, 1: Rules, 2: AI, 3: Catch-Up, 4: Accounts, 5: Saver, 6: Settings)
         self.nav_buttons = []
 
         btn_dash = self._create_nav_btn("📊 Dashboard", 0)
         btn_rules = self._create_nav_btn("⚡ Rule Studio", 1)
         btn_ai = self._create_nav_btn("🤖 AI Assistant", 2)
-        btn_accounts = self._create_nav_btn("📱 Accounts", 3)
-        btn_settings = self._create_nav_btn("⚙️ Settings && Safety", 4)
+        btn_catchup = self._create_nav_btn("📥 Catch-Up Studio", 3)
+        btn_accounts = self._create_nav_btn("📱 Accounts", 4)
+        btn_saver = self._create_nav_btn("🏷️ Order Saver", 5)
+        btn_settings = self._create_nav_btn("⚙️ Settings && Safety", 6)
 
-        self.nav_buttons = [btn_dash, btn_rules, btn_ai, btn_accounts, btn_settings]
+        self.nav_buttons = [btn_dash, btn_rules, btn_ai, btn_catchup, btn_accounts, btn_saver, btn_settings]
 
         for btn in self.nav_buttons:
             layout.addWidget(btn)

@@ -72,12 +72,15 @@ async def receive_webhook(request: Request):
         chat_id = payload.get("from")
         body = payload.get("body", "")
         from_me = payload.get("fromMe", False)
-        logging.info(f"📩 Webhook received message {message_id} from {chat_id} (body: '{body[:60]}', fromMe: {from_me}) via [{session}]")
+        msg_type = str(payload.get("type", "")).lower()
+        has_media = bool(payload.get("hasMedia", False))
+        media_data = payload.get("mediaData")
+        is_voice = bool(payload.get("isVoice", False)) or msg_type in ["ptt", "audio", "voice"] or bool(media_data)
 
         # If message was manually sent by Human VA from phone/web, activate Human Takeover (Feature 2)
         if from_me:
-            customer_chat_id = payload.get("to") or payload.get("chatId")
-            if customer_chat_id and customer_chat_id != chat_id:
+            customer_chat_id = payload.get("to") or payload.get("chatId") or chat_id
+            if customer_chat_id:
                 # 1. Ignore if bot recently sent an automated reply to this customer within 15 seconds
                 if was_recently_replied_by_bot(customer_chat_id, within_seconds=15):
                     return {"status": "ignored_bot_reply"}
@@ -101,8 +104,10 @@ async def receive_webhook(request: Request):
                         except ValueError:
                             takeover_mins = 60.0
                         set_human_takeover(customer_chat_id, takeover_mins)
-                        logging.info(f"🤝 Human VA manual reply detected for {customer_chat_id}. Bot paused for {takeover_mins} mins.")
+                        logging.info(f"🤝 Human agent manual reply to {customer_chat_id} via [{session}]. Bot auto-reply paused for {takeover_mins} mins.")
             return {"status": "ignored_self"}
+
+        logging.info(f"📩 Webhook received message {message_id} from {chat_id} (body: '{body[:60]}', isVoice: {is_voice}) via [{session}]")
 
         if not message_id or not chat_id:
             logging.warning("Received message payload without id or from")
@@ -118,13 +123,13 @@ async def receive_webhook(request: Request):
             logging.info(f"Ignore group filter active: dropped message from group {chat_id}")
             return {"status": "ignored_group"}
 
-        # Ignore empty/undecrypted placeholders awaiting retry decryption
-        if not from_me and not body and not payload.get("hasMedia", False):
+        # Ignore empty/undecrypted placeholders awaiting retry decryption (unless it is a voice note)
+        if not from_me and not body and not has_media and not is_voice:
             logging.info(f"⏳ Ignoring empty/undecrypted placeholder for message {message_id}, waiting for decrypted update...")
             return {"status": "ignored_empty"}
 
-        # Ignore media-only messages without text caption (voice notes, images, stickers, videos)
-        if not from_me and not body.strip() and payload.get("hasMedia", False):
+        # Ignore media-only messages without text caption (silent images, stickers, videos), but ALLOW voice notes
+        if not from_me and not body.strip() and has_media and not is_voice:
             logging.info(f"📷 Dropping inbound media-only message {message_id} from {chat_id} (no text caption)")
             return {"status": "ignored_media_no_body"}
 

@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import json
 import logging
 import time
@@ -127,22 +127,28 @@ class DurableQueueProcessor:
         try:
             # Extract receiving session_name
             session_name = msg.get('session_name') or 'default'
-            if not session_name or session_name == 'default':
-                try:
-                    raw_data = json.loads(msg.get('raw_payload', '{}'))
+            raw_data = {}
+            try:
+                raw_data = json.loads(msg.get('raw_payload', '{}'))
+                if not session_name or session_name == 'default':
                     session_name = (
                         raw_data.get('session') or
                         raw_data.get('payload', {}).get('session') or
                         'default'
                     )
-                except Exception:
-                    session_name = 'default'
+            except Exception:
+                session_name = session_name or 'default'
+
+            payload_dict = raw_data.get('payload', {})
+            is_voice = payload_dict.get('isVoice', False) or bool(payload_dict.get('mediaData'))
+            audio_base64 = payload_dict.get('mediaData')
+            audio_mime = payload_dict.get('mimeType') or 'audio/ogg'
 
             # Mark message as processing
             update_queue_status(msg_id, "processing")
 
-            # Guard: Skip media-only or empty messages without text caption
-            if not body.strip():
+            # Guard: Skip media-only or empty messages without text caption (unless voice note)
+            if not body.strip() and not is_voice:
                 logging.info(f"📷 Media-only/empty message {msg_id} from {chat_id} ignored cleanly.")
                 update_queue_status(msg_id, "ignored")
                 return
@@ -172,8 +178,13 @@ class DurableQueueProcessor:
 
             if ai_master_on and ai_mode == "ai_only":
                 # Mode 2: Exclusive AI Mode (Rules Bypassed)
-                logging.info(f"Exclusive AI Mode active for {msg_id} via session [{session_name}]")
-                ai_reply = await generate_ai_response(sender_id=chat_id, inbound_body=body)
+                logging.info(f"Exclusive AI Mode active for {msg_id} via session [{session_name}] (is_voice: {is_voice})")
+                ai_reply = await generate_ai_response(
+                    sender_id=chat_id,
+                    inbound_body=body or "[Customer sent a voice note]",
+                    audio_base64=audio_base64,
+                    audio_mime_type=audio_mime
+                )
 
                 if not ai_reply or not ai_reply.strip():
                     logging.info(f"AI response empty/failsafe for message {msg_id}. Message ignored cleanly.")
@@ -198,10 +209,10 @@ class DurableQueueProcessor:
                 # Mode 1: Hybrid Mode (Rules First, AI Fallback)
                 rules_master_on = self._settings_cache.get("rules_master_enabled", "1") == "1"
                 matched_rule = None
-                if rules_master_on:
+                if rules_master_on and not is_voice:
                     rules = get_all_rules()
                     matched_rule = match_inbound_message(body, rules)
-                else:
+                elif not rules_master_on:
                     logging.info(f"Rules Master Switch is OFF. Skipping static rule matching for message {msg_id}.")
 
                 if matched_rule:
@@ -240,9 +251,14 @@ class DurableQueueProcessor:
                         update_queue_status(msg_id, "failed")
 
                 elif ai_master_on:
-                    # Hybrid Mode: No rule matched -> trigger AI fallback
-                    logging.info(f"Hybrid Mode: No static rule matched. Triggering AI fallback for message {msg_id} via session [{session_name}]")
-                    ai_reply = await generate_ai_response(sender_id=chat_id, inbound_body=body)
+                    # Hybrid Mode: No rule matched (or is voice note) -> trigger AI fallback
+                    logging.info(f"Hybrid Mode: Triggering AI response for message {msg_id} via session [{session_name}] (is_voice: {is_voice})")
+                    ai_reply = await generate_ai_response(
+                        sender_id=chat_id,
+                        inbound_body=body or "[Customer sent a voice note]",
+                        audio_base64=audio_base64,
+                        audio_mime_type=audio_mime
+                    )
 
                     if not ai_reply or not ai_reply.strip():
                         logging.info(f"AI response empty/failsafe for message {msg_id}. Message ignored cleanly.")

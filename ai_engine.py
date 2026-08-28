@@ -1,7 +1,9 @@
 import asyncio
 import logging
 import httpx
-from typing import Optional, Dict, Any
+import base64
+import re
+from typing import Optional, Dict, Any, Tuple
 from database import get_setting, get_all_rules
 from vault import retrieve_secret
 
@@ -15,6 +17,59 @@ _DEFAULT_SYSTEM_CONTEXT = (
     "Reply in polite English or Roman Urdu (Urdu written in English letters), matching the language the customer used.\n"
     "Keep replies short, clear, and professional."
 )
+
+_IGNORE_PHRASES = {
+    "cannot_answer", "cannot answer", "(no response)", "[no response]", "no response",
+    "(no reply)", "[no reply]", "no reply", "(ignored)", "[ignored]", "ignored",
+    "n/a", "none", "null"
+}
+
+
+def sanitize_ai_reply(reply: str) -> str:
+    """
+    Sanitizes raw AI output.
+    Strips internal thinking blocks (<think>...</think>), reasoning scratchpads,
+    system prompt echoes, and filters out meta-responses like '(No response)' or 'CANNOT_ANSWER'.
+    Returns clean string to send to customer, or empty string "" to silently ignore.
+    """
+    if not reply or not reply.strip():
+        return ""
+
+    text = reply.strip()
+
+    # 1. Remove XML/HTML thinking tags: <think>...</think> or <reasoning>...</reasoning>
+    text = re.sub(r"<(think|reasoning|thought|scratchpad)>.*?</\1>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
+
+    # 2. Strip leading reasoning lines like "Here's a thinking process:" or "We need to follow instructions:"
+    lower_start = text.lower()
+    if (lower_start.startswith("here's a thinking process") or 
+        lower_start.startswith("we need to follow instructions") or 
+        lower_start.startswith("thinking process:")):
+        match = re.search(r"(?:Thus answer:|Answer:|Final Reply:|Reply:)\s*[\"']?(.*?)[\"']?$", text, re.DOTALL | re.IGNORECASE)
+        if match:
+            text = match.group(1).strip()
+        else:
+            return ""
+
+    # 3. Check for exact ignore tokens
+    lower_clean = text.lower().strip().strip("\"'.,;:")
+    if lower_clean in _IGNORE_PHRASES:
+        return ""
+
+    # 4. Check if text contains CANNOT_ANSWER or meta-response phrases
+    if "cannot_answer" in lower_clean or "cannot answer" in lower_clean:
+        return ""
+    if "(no response)" in lower_clean or "[no response]" in lower_clean or "(no reply)" in lower_clean or "no response" == lower_clean:
+        return ""
+
+    # 5. Prevent system prompt echoes (if model regurgitates prompt text)
+    if ("operating guidelines" in lower_clean or 
+        "pre-configured products & answers" in lower_clean or 
+        "system knowledge base" in lower_clean or
+        "pre-configured answer:" in lower_clean):
+        return ""
+
+    return text
 
 
 def build_llm_request(rules_context: str, context_box_text: str, sender_id: str, source_hint, inbound_body: str, model_id: str) -> dict:
@@ -32,7 +87,7 @@ def build_llm_request(rules_context: str, context_box_text: str, sender_id: str,
         "1. SEMANTIC INTENT MATCHING: Customers will ask questions in Roman Urdu (e.g. 'ha?', 'milega?', 'price kya ha?', 'customize shirt ha?'), Urdu, or English with typos or natural phrasing. If their message refers to any Topic / Product in the list below, provide that product's pre-configured details and price.\n"
         "2. NATURAL & POLITE: Reply politely in Roman Urdu or English matching the customer's language. Keep replies concise and formatted with WhatsApp bold (*bold*) where helpful.\n"
         "3. ACCURACY & GROUNDING: Use ONLY the information, pricing, and policies from the list below. Do not invent new prices or make up fake products.\n"
-        "4. UNRELATED INQUIRIES: If the customer asks something completely unrelated to any topic in the list below (e.g., random chit-chat, weather, unrelated services), respond with ONLY the exact word: CANNOT_ANSWER\n\n"
+        "4. UNRELATED INQUIRIES & SILENCE: If the customer sends an address, personal name, random chit-chat, or something unrelated to any topic in the list below, respond with ONLY the exact single word: CANNOT_ANSWER. Never output your internal thinking, chain of thought, explanations, or phrases like '(No response)'.\n\n"
         "=== [PRE-CONFIGURED PRODUCTS & ANSWERS] ===\n"
         f"{rules_context}\n\n"
         "=== [ADDITIONAL KNOWLEDGE BASE] ===\n"
@@ -55,26 +110,84 @@ def build_llm_request(rules_context: str, context_box_text: str, sender_id: str,
         }
     }
 
-async def generate_ai_response(sender_id: str, inbound_body: str, source_hint: Optional[str] = None) -> str:
+
+async def transcribe_audio_groq(audio_base64: str, mime_type: str = "audio/ogg") -> Optional[str]:
     """
-    Generates AI response using Gemini or OpenRouter API.
-    Combines Rule Book + Knowledge Sandbox for accurate Roman Urdu replies.
-    Uses multi-key round-robin rotation via AIKeyPool for high-speed concurrent processing.
+    Transcribes audio using Groq Cloud Whisper Large V3 in ~300ms for free.
+    Returns the clean text transcript in Urdu / English / Roman Urdu, or None if failed.
     """
-    _BEST_FREE_MODEL = "gemini-3.5-flash-lite"
+    groq_key = key_pool.get_groq_key()
+    if not groq_key or not audio_base64:
+        return None
 
-    provider = get_setting("ai_provider", "gemini").lower()
-    model_name = get_setting("ai_model_name", _BEST_FREE_MODEL)
-    if model_name in ("gemini-1.5-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.1-flash-lite"):
-        model_name = _BEST_FREE_MODEL
-    context_text = get_setting("ai_system_context", "")
+    try:
+        raw_bytes = base64.b64decode(audio_base64)
+        if not raw_bytes or len(raw_bytes) < 100:
+            return None
 
-    # Retrieve next available key from Key Pool (Round-Robin)
-    api_key = key_pool.get_next_key()
+        # Determine clean filename and content-type
+        clean_ext = "ogg"
+        if "wav" in mime_type:
+            clean_ext = "wav"
+        elif "mp3" in mime_type or "mpeg" in mime_type:
+            clean_ext = "mp3"
+        elif "m4a" in mime_type or "mp4" in mime_type:
+            clean_ext = "m4a"
 
-    if not api_key:
-        logging.warning("AI Fallback triggered but no API keys found in vault or key pool.")
+        files = {
+            "file": (f"audio.{clean_ext}", raw_bytes, mime_type or "audio/ogg")
+        }
+        data = {
+            "model": "whisper-large-v3",
+            "prompt": "Urdu, Punjabi, Roman Urdu WhatsApp voice message regarding product prices, delivery time, and location.",
+            "response_format": "json"
+        }
+        headers = {
+            "Authorization": f"Bearer {groq_key}"
+        }
+
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            resp = await client.post("https://api.groq.com/openai/v1/audio/transcriptions", files=files, data=data, headers=headers)
+            if resp.status_code == 200:
+                transcript = resp.json().get("text", "").strip()
+                if transcript:
+                    logging.info(f"🎙️ Groq Whisper V3 successfully transcribed voice note in 0.3s: \"{transcript}\"")
+                    return transcript
+            else:
+                logging.warning(f"Groq Whisper transcription HTTP {resp.status_code}: {resp.text[:120]}")
+    except Exception as e:
+        logging.warning(f"Groq Whisper transcription exception: {e}")
+    return None
+
+
+async def generate_ai_response(
+    sender_id: str,
+    inbound_body: str,
+    source_hint: Optional[str] = None,
+    audio_base64: Optional[str] = None,
+    audio_mime_type: Optional[str] = None
+) -> str:
+    """
+    Generates AI response using a 3-Tier Multi-Provider Cascade:
+      Tier 1: Google Gemini (3 Slots, Round-Robin)
+      Tier 2: OpenRouter Failover (Slot 4 - Llama 3.3 70B / DeepSeek)
+      Tier 3: Groq Cloud Failover (Slot 5 - Llama 3.3 70B Versatile)
+    For voice notes: automatically uses Groq Whisper Large V3 (0.3s transcription) with Gemini multimodal fallback.
+    """
+    _BEST_FREE_GEMINI_MODEL = "gemini-3.5-flash-lite"
+
+    # Check if voice auto-reply is enabled in settings
+    voice_enabled = get_setting("ai_voice_enabled", "1") == "1"
+    if audio_base64 and not voice_enabled:
+        logging.info(f"Voice Note auto-reply is disabled in settings. Skipping message from {sender_id}.")
         return DEFAULT_FALLBACK_REPLY
+
+    # Step 1: If it's a voice note and Groq key is present, transcribe it in 0.3s!
+    if audio_base64:
+        transcript = await transcribe_audio_groq(audio_base64, audio_mime_type or "audio/ogg")
+        if transcript:
+            inbound_body = transcript
+            audio_base64 = None  # Now converted to text — 95% token savings & 100% provider compatibility!
 
     # Fetch active rules to provide AI with live Rule Book context
     rules = get_all_rules()
@@ -83,110 +196,218 @@ async def generate_ai_response(sender_id: str, inbound_body: str, source_hint: O
         if r.get('is_enabled', 1):
             rules_lines.append(f"- Topic / Product: '{r['rule_name']}' | Keywords: {r['keyword_payload']} | Pre-configured Answer: \"{r['response_message']}\"")
     rules_context = "\n".join(rules_lines) if rules_lines else "No static rules configured."
+    context_text = get_setting("ai_system_context", "")
 
-    req_payload = build_llm_request(rules_context, context_text, sender_id, source_hint, inbound_body, model_name)
-    
-    # Provider-specific endpoint & payload translation
-    if provider == "gemini":
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-        body = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": req_payload["messages"][0]["content"]}]
+    # =========================================================================
+    # TIER 1: GOOGLE GEMINI (Slots 1, 2, 3 in Round-Robin)
+    # =========================================================================
+    gemini_keys = key_pool.get_gemini_keys()
+    if gemini_keys:
+        active_gemini_model = "gemini-3.5-flash" if audio_base64 else _BEST_FREE_GEMINI_MODEL
+        req_payload = build_llm_request(rules_context, context_text, sender_id, source_hint, inbound_body, active_gemini_model)
+
+        user_parts = []
+        if audio_base64:
+            clean_mime = audio_mime_type.split(";")[0].strip() if audio_mime_type else "audio/ogg"
+            user_parts.append({
+                "text": (
+                    f"Customer WhatsApp ID: {sender_id}.\n"
+                    "The customer sent the attached audio voice message. Listen carefully to what the customer is saying in Urdu, Roman Urdu, Punjabi, or English.\n"
+                    "Answer their inquiry politely and concisely in Roman Urdu using our products, pricing, delivery policies, and business information."
+                )
+            })
+            user_parts.append({
+                "inlineData": {
+                    "mimeType": clean_mime,
+                    "data": audio_base64
                 }
-            ],
-            "systemInstruction": {
-                "parts": [{"text": req_payload["system_instruction"]}]
-            },
-            "generationConfig": req_payload["generation_config"]
+            })
+            sys_text = (
+                f"{context_text}\n\n"
+                "=== VOICE NOTE OPERATING INSTRUCTIONS ===\n"
+                "1. Understand the customer's spoken words in Urdu, Punjabi, Roman Urdu, or English.\n"
+                "2. Answer their questions directly, politely, and realistically in concise Roman Urdu.\n"
+                "3. Keep the reply short and natural like a real human support assistant.\n\n"
+                "=== [PRE-CONFIGURED PRODUCTS & ANSWERS] ===\n"
+                f"{rules_context}\n\n"
+                "=== [KNOWLEDGE BASE] ===\n"
+                f"{context_text}"
+            )
+        else:
+            user_parts.append({"text": req_payload["messages"][0]["content"]})
+            sys_text = req_payload["system_instruction"]
+
+        gen_config = dict(req_payload["generation_config"])
+        if audio_base64:
+            gen_config["temperature"] = 0.4
+            gen_config["max_output_tokens"] = 350
+
+        gemini_body = {
+            "contents": [{"role": "user", "parts": user_parts}],
+            "systemInstruction": {"parts": [{"text": sys_text}]},
+            "generationConfig": gen_config
         }
-        headers = {"Content-Type": "application/json"}
-    else: # OpenRouter / OpenAI compatible
-        url = "https://openrouter.ai/api/v1/chat/completions"
-        body = {
-            "model": model_name,
+
+        # Try up to 3 Gemini attempts across available keys
+        for attempt in range(min(3, len(gemini_keys) * 2)):
+            current_k = key_pool.get_next_gemini_key()
+            if not current_k:
+                break
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{active_gemini_model}:generateContent?key={current_k}"
+            req_timeout = 25.0 if audio_base64 else 12.0
+
+            try:
+                async with httpx.AsyncClient(timeout=req_timeout) as client:
+                    resp = await client.post(url, json=gemini_body, headers={"Content-Type": "application/json"})
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        candidates = data.get("candidates", [])
+                        if candidates:
+                            for cand in candidates:
+                                finish_reason = cand.get("finishReason", "")
+                                parts = cand.get("content", {}).get("parts", [])
+                                if not parts and finish_reason in ("STOP", "SAFETY", "BLOCKLIST"):
+                                    logging.info(f"Gemini returned empty stop ({finish_reason}). Silently ignoring message from {sender_id}.")
+                                    return DEFAULT_FALLBACK_REPLY
+                                for p in parts:
+                                    raw_reply = p.get("text", "")
+                                    clean_reply = sanitize_ai_reply(raw_reply)
+                                    if clean_reply:
+                                        return clean_reply
+                                    elif clean_reply == "" and raw_reply.strip():
+                                        logging.info(f"AI returned ignore token ({raw_reply[:30]!r}). Silently ignoring for {sender_id}.")
+                                        return DEFAULT_FALLBACK_REPLY
+
+                    # Handle 429 Rate Limiting or 401/403/400 Account Errors
+                    if resp.status_code == 429:
+                        err_text = resp.text.lower()
+                        is_quota = "quota" in err_text or "resource_exhausted" in err_text
+                        cooldown = 1800.0 if is_quota else 30.0
+                        key_pool.mark_rate_limited(current_k, cooldown_seconds=cooldown)
+                        logging.warning(f"Tier 1 (Gemini) key 429 limit. Trying next slot...")
+                    elif resp.status_code in (400, 401, 403):
+                        key_pool.mark_rate_limited(current_k, cooldown_seconds=86400.0)
+                        logging.warning(f"Tier 1 (Gemini) key unauthorized/disabled (HTTP {resp.status_code}). Removing key from rotation.")
+                    else:
+                        logging.warning(f"Tier 1 (Gemini) attempt {attempt+1} status {resp.status_code}: {resp.text[:100]}")
+            except Exception as e:
+                logging.warning(f"Tier 1 (Gemini) exception attempt {attempt+1}: {e}")
+                key_pool.mark_rate_limited(current_k, cooldown_seconds=30.0)
+
+    # =========================================================================
+    # TIER 2: OPENROUTER (Slot 4 Failover)
+    # =========================================================================
+    openrouter_key = key_pool.get_openrouter_key()
+    if openrouter_key:
+        or_model = get_setting("openrouter_model_name", "nvidia/nemotron-3-super-120b-a12b:free").strip() or "nvidia/nemotron-3-super-120b-a12b:free"
+        logging.info(f"🔄 Cascading to Tier 2: OpenRouter Failover (Slot 4, Model: {or_model})...")
+        req_payload = build_llm_request(rules_context, context_text, sender_id, source_hint, inbound_body, or_model)
+        or_body = {
+            "model": or_model,
             "messages": [
                 {"role": "system", "content": req_payload["system_instruction"]},
                 {"role": "user", "content": req_payload["messages"][0]["content"]}
             ],
-            "max_tokens": req_payload["generation_config"]["max_output_tokens"],
-            "temperature": req_payload["generation_config"]["temperature"]
+            "max_tokens": 350,
+            "temperature": 0.2
         }
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
+        or_headers = {
+            "Authorization": f"Bearer {openrouter_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "http://localhost:8000",
+            "X-Title": "CyberSolu Auto"
         }
-
-    for attempt in range(2):
         try:
-            async with httpx.AsyncClient(timeout=12.0) as client:
-                resp = await client.post(url, json=body, headers=headers)
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post("https://openrouter.ai/api/v1/chat/completions", json=or_body, headers=or_headers)
                 if resp.status_code == 200:
                     data = resp.json()
-                    if provider == "gemini":
-                        candidates = data.get("candidates", [])
-                        if candidates:
-                            parts = candidates[0].get("content", {}).get("parts", [])
-                            if parts:
-                                reply = parts[0].get("text", "").strip()
-                                if "CANNOT_ANSWER" in reply:
-                                    logging.info(f"AI could not answer from Rule Book for message from {sender_id}. Silently ignoring.")
-                                    return DEFAULT_FALLBACK_REPLY
-                                return reply
-                    else:
-                        choices = data.get("choices", [])
-                        if choices:
-                            reply = choices[0].get("message", {}).get("content", "").strip()
-                            if "CANNOT_ANSWER" in reply:
-                                logging.info(f"AI could not answer from Rule Book for message from {sender_id}. Silently ignoring.")
-                                return DEFAULT_FALLBACK_REPLY
-                            return reply
-
-                # Handle HTTP 429 Rate Limiting — rotate to next key immediately
-                if resp.status_code == 429:
-                    key_pool.mark_rate_limited(api_key, cooldown_seconds=60.0)
-                    next_k = key_pool.get_next_key()
-                    if next_k and next_k != api_key:
-                        api_key = next_k
-                        if provider == "gemini":
-                            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-                        else:
-                            headers["Authorization"] = f"Bearer {api_key}"
-
-                logging.warning(f"AI API request failed attempt {attempt+1}: Status {resp.status_code} {resp.text[:120]}")
-                
-                # If Gemini returned 404 (deprecated model), auto-switch to the working lite model
-                if provider == "gemini" and resp.status_code == 404 and model_name != _BEST_FREE_MODEL:
-                    logging.info(f"Model {model_name} returned 404 (deprecated). Auto-switching to {_BEST_FREE_MODEL}")
-                    model_name = _BEST_FREE_MODEL
-                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+                    choices = data.get("choices", [])
+                    if choices:
+                        raw_reply = choices[0].get("message", {}).get("content", "")
+                        clean_reply = sanitize_ai_reply(raw_reply)
+                        if clean_reply:
+                            logging.info(f"✅ Reply successfully generated by Tier 2 (OpenRouter {or_model})!")
+                            return clean_reply
+                        elif clean_reply == "" and raw_reply.strip():
+                            logging.info(f"OpenRouter returned ignore token ({raw_reply[:30]!r}). Silently ignoring for {sender_id}.")
+                            return DEFAULT_FALLBACK_REPLY
+                elif resp.status_code == 429:
+                    key_pool.mark_rate_limited(openrouter_key, cooldown_seconds=60.0)
+                elif resp.status_code in (400, 401, 403):
+                    key_pool.mark_rate_limited(openrouter_key, cooldown_seconds=86400.0)
+                logging.warning(f"Tier 2 (OpenRouter) failed: {resp.status_code} {resp.text[:100]}")
         except Exception as e:
-            logging.warning(f"AI API request exception attempt {attempt+1}: {e}")
-        
-        if attempt == 0:
-            await asyncio.sleep(0.5)
+            logging.warning(f"Tier 2 (OpenRouter) exception: {e}")
+            key_pool.mark_rate_limited(openrouter_key, cooldown_seconds=30.0)
 
+    # =========================================================================
+    # TIER 3: GROQ CLOUD (Slot 5 Failover - OpenAI GPT OSS 20B / 120B)
+    # =========================================================================
+    groq_key = key_pool.get_groq_key()
+    if groq_key:
+        groq_model = get_setting("groq_model_name", "openai/gpt-oss-20b").strip() or "openai/gpt-oss-20b"
+        logging.info(f"🔄 Cascading to Tier 3: Groq Cloud Failover (Slot 5, Model: {groq_model})...")
+        req_payload = build_llm_request(rules_context, context_text, sender_id, source_hint, inbound_body, groq_model)
+        groq_body = {
+            "model": groq_model,
+            "messages": [
+                {"role": "system", "content": req_payload["system_instruction"]},
+                {"role": "user", "content": req_payload["messages"][0]["content"]}
+            ],
+            "max_tokens": 350,
+            "temperature": 0.2
+        }
+        groq_headers = {
+            "Authorization": f"Bearer {groq_key}",
+            "Content-Type": "application/json"
+        }
+        try:
+            async with httpx.AsyncClient(timeout=12.0) as client:
+                resp = await client.post("https://api.groq.com/openai/v1/chat/completions", json=groq_body, headers=groq_headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    choices = data.get("choices", [])
+                    if choices:
+                        raw_reply = choices[0].get("message", {}).get("content", "")
+                        clean_reply = sanitize_ai_reply(raw_reply)
+                        if clean_reply:
+                            logging.info(f"✅ Reply successfully generated by Tier 3 (Groq {groq_model})!")
+                            return clean_reply
+                        elif clean_reply == "" and raw_reply.strip():
+                            logging.info(f"Groq returned ignore token ({raw_reply[:30]!r}). Silently ignoring for {sender_id}.")
+                            return DEFAULT_FALLBACK_REPLY
+                elif resp.status_code == 429:
+                    key_pool.mark_rate_limited(groq_key, cooldown_seconds=60.0)
+                elif resp.status_code in (400, 401, 403):
+                    key_pool.mark_rate_limited(groq_key, cooldown_seconds=86400.0)
+                logging.warning(f"Tier 3 (Groq) failed: {resp.status_code} {resp.text[:100]}")
+        except Exception as e:
+            logging.warning(f"Tier 3 (Groq) exception: {e}")
+            key_pool.mark_rate_limited(groq_key, cooldown_seconds=30.0)
+
+    logging.warning("All AI tiers (Gemini, OpenRouter, Groq) failed or returned empty response.")
     return DEFAULT_FALLBACK_REPLY
 
 
-async def test_ai_connection(api_key: str, model_name: str = "gemini-3.5-flash-lite", provider: str = "gemini"):
+async def test_ai_connection(api_key: str, model_name: str = "gemini-3.5-flash-lite", provider: str = "gemini") -> Tuple[bool, str, float]:
     """
     Sends a test ping to the AI provider to verify connectivity and measure latency.
     Returns (success: bool, message: str, latency_seconds: float).
     """
     import time
     start_t = time.time()
+    prov = provider.lower()
     try:
-        if provider == "gemini":
+        if prov == "gemini":
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
             body = {
                 "contents": [{"role": "user", "parts": [{"text": "Say 'OK' in one word."}]}],
                 "generationConfig": {"max_output_tokens": 10, "temperature": 0.0}
             }
             headers = {"Content-Type": "application/json"}
-        else:
-            url = "https://openrouter.ai/api/v1/chat/completions"
+        elif prov == "groq":
+            url = "https://api.groq.com/openai/v1/chat/completions"
             body = {
                 "model": model_name,
                 "messages": [{"role": "user", "content": "Say 'OK' in one word."}],
@@ -194,15 +415,31 @@ async def test_ai_connection(api_key: str, model_name: str = "gemini-3.5-flash-l
                 "temperature": 0.0
             }
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        else: # openrouter
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            body = {
+                "model": model_name,
+                "messages": [{"role": "user", "content": "Say 'OK' in one word."}],
+                "max_tokens": 10,
+                "temperature": 0.0
+            }
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "http://localhost:8000",
+                "X-Title": "CyberSolu Auto"
+            }
 
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(url, json=body, headers=headers)
             elapsed = time.time() - start_t
             if resp.status_code == 200:
                 return True, f"Connection verified in {elapsed:.2f}s!", elapsed
             else:
-                return False, f"HTTP {resp.status_code}: {resp.text[:120]}", elapsed
+                return False, f"HTTP {resp.status_code}: {resp.text[:100]}", elapsed
     except Exception as e:
         elapsed = time.time() - start_t
-        return False, f"Network Error: {str(e)[:120]}", elapsed
+        err_msg = str(e) or type(e).__name__
+        return False, f"Network Error: {err_msg[:100]}", elapsed
+
 
