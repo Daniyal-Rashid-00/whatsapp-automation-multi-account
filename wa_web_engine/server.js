@@ -163,7 +163,14 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
           '--no-restore-session-state',
           '--disable-session-crashed-bubble',
           '--hide-crash-restore-bubble',
-          '--no-default-browser-check'
+          '--no-default-browser-check',
+          '--js-flags=--max-old-space-size=384',
+          '--disable-extensions',
+          '--disable-background-networking',
+          '--disable-sync',
+          '--disable-default-apps',
+          '--disable-translate',
+          '--metrics-recording-only'
         ]
       }
     });

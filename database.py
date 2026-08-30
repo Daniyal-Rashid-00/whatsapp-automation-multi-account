@@ -210,7 +210,8 @@ def clear_db():
 _deleted_session_names: set = set()
 
 def backup_session_keys(session_name: str) -> bool:
-    """Creates a redundant backup copy of wa_web_engine/sessions/session-<session_name> into wa_web_engine/sessions_backup/"""
+    """Creates a fast, lightweight backup copy of vital authentication keys into wa_web_engine/sessions_backup/
+    Excludes volatile browser caches to eliminate startup disk write spikes while ensuring 100% session persistence."""
     import os
     import shutil
     base_dir = os.path.dirname(__file__)
@@ -224,7 +225,13 @@ def backup_session_keys(session_name: str) -> bool:
         os.makedirs(os.path.dirname(dst_dir), exist_ok=True)
         if os.path.exists(dst_dir):
             shutil.rmtree(dst_dir, ignore_errors=True)
-        shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
+        # Exclude temporary cache folders and metrics to reduce disk copy load
+        ignore_caches = shutil.ignore_patterns(
+            "Cache*", "Code Cache*", "GPUCache*", "DawnCache*", "ShaderCache*",
+            "Crashpad*", "CacheStorage*", "ScriptCache*", "BrowserMetrics*",
+            "component_crx_cache*", "*.tmp", "*.pma"
+        )
+        shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True, ignore=ignore_caches)
         return True
     except Exception:
         return False
@@ -245,7 +252,12 @@ def restore_session_keys(session_name: str) -> bool:
 
     try:
         os.makedirs(os.path.dirname(dst_dir), exist_ok=True)
-        shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
+        ignore_caches = shutil.ignore_patterns(
+            "Cache*", "Code Cache*", "GPUCache*", "DawnCache*", "ShaderCache*",
+            "Crashpad*", "CacheStorage*", "ScriptCache*", "BrowserMetrics*",
+            "component_crx_cache*", "*.tmp", "*.pma"
+        )
+        shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True, ignore=ignore_caches)
         return True
     except Exception:
         return False

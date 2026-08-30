@@ -16,6 +16,7 @@ from database import (
 )
 from rule_engine import match_inbound_message
 from ai_engine import generate_ai_response
+from postex_engine import resolve_postex_tracking
 from rate_governor import check_and_apply_rate_limit
 from waha_client import WAHAClient
 
@@ -171,6 +172,37 @@ class DurableQueueProcessor:
                     logging.info(f"🔁 Cooldown active for {chat_id} ({cd_mins} mins). Skipping repeat auto-reply.")
                     update_queue_status(msg_id, "ignored")
                     return
+
+            # 🚚 Option A: PostEx Courier Automated Parcel Tracking Resolution
+            postex_on = self._settings_cache.get("postex_tracking_enabled", "1") == "1"
+            if postex_on:
+                customer_name = payload_dict.get("name") or ""
+                customer_phone = payload_dict.get("phone") or chat_id.split("@")[0]
+                try:
+                    postex_reply = await resolve_postex_tracking(
+                        inbound_body=body,
+                        contact_name=customer_name,
+                        customer_phone=customer_phone
+                    )
+                    if postex_reply and postex_reply.strip():
+                        logging.info(f"🚚 PostEx Automated Tracking Match for message {msg_id} via session [{session_name}]")
+                        allowed, reason = await check_and_apply_rate_limit(chat_id)
+                        if not allowed:
+                            logging.warning(f"Rate governor blocked PostEx tracking dispatch for {msg_id}: {reason}")
+                            update_queue_status(msg_id, "failed")
+                            return
+
+                        sent_ok = await self.waha_client.send_text(chat_id, postex_reply, session=session_name)
+                        if sent_ok:
+                            update_queue_status(msg_id, "done")
+                            record_reply_timestamp(chat_id)
+                            return
+                        else:
+                            logging.error(f"Failed to dispatch PostEx tracking reply for message {msg_id} via session [{session_name}]")
+                            update_queue_status(msg_id, "failed")
+                            return
+                except Exception as e:
+                    logging.warning(f"PostEx tracking check error for message {msg_id}: {e}")
 
             # Check AI Master Switch & Operating Mode
             ai_master_on = self._settings_cache.get("ai_master_enabled", self._settings_cache.get("ai_fallback_enabled", "0")) == "1"

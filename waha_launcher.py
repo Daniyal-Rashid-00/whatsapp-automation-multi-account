@@ -16,6 +16,20 @@ class WAHALauncher:
     def is_node_available() -> bool:
         return shutil.which("node") is not None or shutil.which("npx") is not None
 
+    @staticmethod
+    def cleanup_orphaned_chrome_processes():
+        """Terminates any stale/orphaned Chromium processes left behind by previous app sessions to free leaked RAM."""
+        if os.name == 'nt':
+            try:
+                subprocess.run(
+                    ["powershell", "-Command", "Get-Process chrome -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*puppeteer*' -or $_.Path -like '*wa_web_engine*' } | Stop-Process -Force -ErrorAction SilentlyContinue"],
+                    capture_output=True,
+                    timeout=4,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+                )
+            except Exception:
+                pass
+
     @classmethod
     def is_waha_server_running(cls, port: int = 3000) -> bool:
         """Synchronously check if local engine is listening and healthy on port."""
@@ -40,6 +54,8 @@ class WAHALauncher:
 
         cls._is_launching = True
         try:
+            cls.cleanup_orphaned_chrome_processes()
+
             if not cls.is_node_available():
                 return False, "Node.js was not found on your system. Please ensure Node.js is installed."
 

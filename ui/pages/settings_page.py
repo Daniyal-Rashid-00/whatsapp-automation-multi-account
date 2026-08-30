@@ -1,19 +1,26 @@
+import asyncio
+import threading
 from urllib.parse import urlparse
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox,
     QPushButton, QMessageBox, QFrame, QLineEdit
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from database import get_setting, set_setting
 from vault import store_secret, retrieve_secret
 from ui.theme import COLOR_AMBER_ALERT
 from ui.widgets.toggle_switch import ToggleSwitch
 from waha_launcher import WAHALauncher
+from postex_client import PostExClient
 
 
 class SettingsPage(QWidget):
+    postex_test_signal = pyqtSignal(bool, str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
+
+        self.postex_test_signal.connect(self._on_postex_test_result)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -100,49 +107,50 @@ class SettingsPage(QWidget):
 
         v_url = QVBoxLayout()
         v_url.setSpacing(4)
-        v_url.addWidget(QLabel("GATEWAY SERVER BASE URL:"))
-        self.txt_waha_url = QLineEdit()
-        self.txt_waha_url.setPlaceholderText("http://localhost:3000")
+        lbl_url = QLabel("GATEWAY BASE URL:")
+        lbl_url.setStyleSheet("font-weight: 600; font-size: 11px; color: #8B949E;")
+        v_url.addWidget(lbl_url)
+        self.txt_waha_url = QLineEdit("http://localhost:3000")
         v_url.addWidget(self.txt_waha_url)
         row_waha.addLayout(v_url, stretch=2)
 
-        v_wkey = QVBoxLayout()
-        v_wkey.setSpacing(4)
-        v_wkey.addWidget(QLabel("GATEWAY API KEY (X-Api-Key):"))
+        v_key = QVBoxLayout()
+        v_key.setSpacing(4)
+        lbl_key = QLabel("GATEWAY API KEY:")
+        lbl_key.setStyleSheet("font-weight: 600; font-size: 11px; color: #8B949E;")
+        v_key.addWidget(lbl_key)
         self.txt_waha_key = QLineEdit()
         self.txt_waha_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.txt_waha_key.setPlaceholderText("Optional API Key...")
-        v_wkey.addWidget(self.txt_waha_key)
-        row_waha.addLayout(v_wkey, stretch=2)
+        self.txt_waha_key.setPlaceholderText("Optional API key")
+        v_key.addWidget(self.txt_waha_key)
+        row_waha.addLayout(v_key, stretch=2)
 
-        btn_save_waha = QPushButton("Save Gateway Configuration")
-        btn_save_waha.setObjectName("btnSecondary")
+        btn_save_waha = QPushButton("Save Endpoint")
+        btn_save_waha.setObjectName("btnPrimary")
         btn_save_waha.clicked.connect(self._save_waha_settings)
-        row_waha.addWidget(btn_save_waha, stretch=1)
+        row_waha.addWidget(btn_save_waha)
+
+        btn_launch = QPushButton("▶ Launch Engine Process")
+        btn_launch.setObjectName("btnSecondary")
+        btn_launch.clicked.connect(self._launch_waha_action)
+        row_waha.addWidget(btn_launch)
 
         waha_layout.addLayout(row_waha)
-
-        btn_launch = QPushButton("Initialize WhatsApp Gateway Engine")
-        btn_launch.setObjectName("btnPrimary")
-        btn_launch.setMinimumHeight(38)
-        btn_launch.clicked.connect(self._launch_waha_action)
-        waha_layout.addWidget(btn_launch)
-
         layout.addWidget(card_waha)
 
-        # 3. Enterprise Automation & Filter Controls Frame
+        # 3. Message & Audience Safety Controls
         card_safety = QFrame()
         card_safety.setObjectName("cardFrame")
         safety_layout = QVBoxLayout(card_safety)
         safety_layout.setContentsMargins(18, 18, 18, 18)
-        safety_layout.setSpacing(16)
+        safety_layout.setSpacing(14)
 
-        lbl_safety_title = QLabel("Enterprise Automation & Filter Controls")
+        lbl_safety_title = QLabel("Message & Audience Safety Controls")
         lbl_safety_title.setStyleSheet("font-size: 14px; font-weight: 700; color: #F0F6FC;")
         safety_layout.addWidget(lbl_safety_title)
 
         toggles_grid = QVBoxLayout()
-        toggles_grid.setSpacing(14)
+        toggles_grid.setSpacing(12)
 
         # Toggle Row 1: Ignore Group Messages
         row_grp = QHBoxLayout()
@@ -154,7 +162,7 @@ class SettingsPage(QWidget):
         lbl_grp = QLabel("Ignore Group Messages")
         lbl_grp.setStyleSheet("font-weight: 700; font-size: 13px; color: #F0F6FC;")
         v_grp.addWidget(lbl_grp)
-        lbl_grp_sub = QLabel("Automated replies only for 1-on-1 customer chats, not group messages.")
+        lbl_grp_sub = QLabel("Do not trigger auto-replies or AI responses inside group chats.")
         lbl_grp_sub.setStyleSheet("font-size: 11px; color: #8B949E;")
         v_grp.addWidget(lbl_grp_sub)
         row_grp.addLayout(v_grp)
@@ -167,14 +175,14 @@ class SettingsPage(QWidget):
         div1.setStyleSheet("background-color: #21262D; border: none;")
         toggles_grid.addWidget(div1)
 
-        # Toggle Row 2: Auto-Start Engine
+        # Toggle Row 2: Auto-Start Engine on App Launch
         row_auto = QHBoxLayout()
         row_auto.setSpacing(14)
         self.tog_autostart = ToggleSwitch(checked=True)
         row_auto.addWidget(self.tog_autostart)
         v_auto = QVBoxLayout()
         v_auto.setSpacing(2)
-        lbl_auto = QLabel("Auto-Start Gateway Engine on Launch")
+        lbl_auto = QLabel("Auto-Start WhatsApp Engine on Launch")
         lbl_auto.setStyleSheet("font-weight: 700; font-size: 13px; color: #F0F6FC;")
         v_auto.addWidget(lbl_auto)
         lbl_auto_sub = QLabel("Automatically launch the Baileys WhatsApp engine when CyberSolu Auto starts.")
@@ -190,14 +198,14 @@ class SettingsPage(QWidget):
         div2.setStyleSheet("background-color: #21262D; border: none;")
         toggles_grid.addWidget(div2)
 
-        # Toggle Row 3: Per-Customer Reply Cooldown (Feature 1)
+        # Toggle Row 3: Per-Customer Reply Cooldown
         row_cd = QHBoxLayout()
         row_cd.setSpacing(14)
         self.tog_cooldown = ToggleSwitch(checked=True)
         row_cd.addWidget(self.tog_cooldown)
         v_cd = QVBoxLayout()
         v_cd.setSpacing(2)
-        lbl_cd = QLabel("Per-Customer Reply Cooldown (Feature 1)")
+        lbl_cd = QLabel("Per-Customer Reply Cooldown")
         lbl_cd.setStyleSheet("font-weight: 700; font-size: 13px; color: #F0F6FC;")
         v_cd.addWidget(lbl_cd)
         lbl_cd_sub = QLabel("Prevents sending the exact same auto-reply to a customer within the cooldown duration.")
@@ -220,14 +228,14 @@ class SettingsPage(QWidget):
         div3.setStyleSheet("background-color: #21262D; border: none;")
         toggles_grid.addWidget(div3)
 
-        # Toggle Row 4: Human VA Takeover Mode (Feature 2)
+        # Toggle Row 4: Human VA Takeover Mode
         row_ht = QHBoxLayout()
         row_ht.setSpacing(14)
         self.tog_takeover = ToggleSwitch(checked=True)
         row_ht.addWidget(self.tog_takeover)
         v_ht = QVBoxLayout()
         v_ht.setSpacing(2)
-        lbl_ht = QLabel("Human VA Manual Takeover Mode (Feature 2)")
+        lbl_ht = QLabel("Human VA Manual Takeover Mode")
         lbl_ht.setStyleSheet("font-weight: 700; font-size: 13px; color: #F0F6FC;")
         v_ht.addWidget(lbl_ht)
         lbl_ht_sub = QLabel("Automatically pauses bot auto-replies for a contact when a human VA manually replies.")
@@ -254,15 +262,99 @@ class SettingsPage(QWidget):
 
         layout.addWidget(card_safety)
 
-        # 4. Compliance & Risk Notice Frame
+        # =====================================================================
+        # 4. PostEx Courier Automated Parcel Tracking Integration Card
+        # =====================================================================
+        card_postex = QFrame()
+        card_postex.setObjectName("cardFrame")
+        postex_layout = QVBoxLayout(card_postex)
+        postex_layout.setContentsMargins(18, 18, 18, 18)
+        postex_layout.setSpacing(12)
+
+        # Title Row with Master Toggle
+        row_p_title = QHBoxLayout()
+        lbl_p_title = QLabel("📦 PostEx Courier Automated Parcel Tracking")
+        lbl_p_title.setStyleSheet("font-size: 14px; font-weight: 700; color: #F0F6FC;")
+        row_p_title.addWidget(lbl_p_title)
+        row_p_title.addStretch()
+
+        self.tog_postex = ToggleSwitch(checked=True)
+        row_p_title.addWidget(self.tog_postex)
+        postex_layout.addLayout(row_p_title)
+
+        lbl_p_desc = QLabel(
+            "Automatically queries PostEx APIs and replies to customer parcel inquiries on WhatsApp with live status.\n"
+            "Recognizes Order IDs from saved contacts (e.g. '2250', '121012') and message text. Gracefully skips TCS and unbooked orders."
+        )
+        lbl_p_desc.setStyleSheet("font-size: 12px; color: #8B949E; line-height: 1.4;")
+        postex_layout.addWidget(lbl_p_desc)
+
+        # Token Input Row
+        row_token = QHBoxLayout()
+        row_token.setSpacing(10)
+
+        v_tok = QVBoxLayout()
+        v_tok.setSpacing(4)
+        lbl_tok = QLabel("POSTEX MERCHANT API TOKEN:")
+        lbl_tok.setStyleSheet("font-weight: 600; font-size: 11px; color: #8B949E;")
+        v_tok.addWidget(lbl_tok)
+
+        row_inp = QHBoxLayout()
+        self.inp_postex_token = QLineEdit()
+        self.inp_postex_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.inp_postex_token.setPlaceholderText("Paste your PostEx API Token from merchant portal...")
+        self.inp_postex_token.setStyleSheet("""
+            QLineEdit {
+                background-color: #0D1117;
+                border: 1px solid #30363D;
+                border-radius: 6px;
+                padding: 8px 12px;
+                color: #F0F6FC;
+                font-size: 12px;
+            }
+        """)
+        row_inp.addWidget(self.inp_postex_token, stretch=1)
+
+        self.btn_show_token = QPushButton("👁️")
+        self.btn_show_token.setFixedWidth(36)
+        self.btn_show_token.setFixedHeight(34)
+        self.btn_show_token.setObjectName("btnSecondary")
+        self.btn_show_token.clicked.connect(self._toggle_token_visibility)
+        row_inp.addWidget(self.btn_show_token)
+
+        v_tok.addLayout(row_inp)
+        row_token.addLayout(v_tok, stretch=3)
+
+        self.btn_test_postex = QPushButton("🔌 Test Connection")
+        self.btn_test_postex.setObjectName("btnSecondary")
+        self.btn_test_postex.setFixedHeight(34)
+        self.btn_test_postex.clicked.connect(self._test_postex_connection)
+        row_token.addWidget(self.btn_test_postex)
+
+        self.btn_save_postex = QPushButton("Save PostEx Settings")
+        self.btn_save_postex.setObjectName("btnPrimary")
+        self.btn_save_postex.setFixedHeight(34)
+        self.btn_save_postex.clicked.connect(self._save_postex_settings)
+        row_token.addWidget(self.btn_save_postex)
+
+        postex_layout.addLayout(row_token)
+
+        self.lbl_postex_status = QLabel("")
+        self.lbl_postex_status.setStyleSheet("font-size: 11px; font-weight: 600; padding: 2px;")
+        postex_layout.addWidget(self.lbl_postex_status)
+
+        layout.addWidget(card_postex)
+
+        # 5. Compliance & Risk Notice Frame
         warn_frame = QFrame()
         warn_frame.setStyleSheet(
             f"background-color: rgba(245, 158, 11, 0.08); border: 1px solid {COLOR_AMBER_ALERT}; border-radius: 8px; padding: 12px;"
         )
         wf_layout = QVBoxLayout(warn_frame)
+        wf_layout.setContentsMargins(14, 12, 14, 12)
         wf_layout.setSpacing(6)
 
-        lbl_warn_title = QLabel("⚠️ Compliance & Safety Notice")
+        lbl_warn_title = QLabel("⚠️ Anti-Ban Safety Notice & Recommendations")
         lbl_warn_title.setStyleSheet(f"color: {COLOR_AMBER_ALERT}; font-weight: 700; font-size: 13px;")
         wf_layout.addWidget(lbl_warn_title)
 
@@ -315,6 +407,12 @@ class SettingsPage(QWidget):
         except ValueError:
             pass
 
+        # PostEx Settings
+        self.tog_postex.setChecked(get_setting("postex_tracking_enabled", "1") == "1")
+        postex_token = retrieve_secret("postex_api_token") or get_setting("postex_api_token", "")
+        if postex_token:
+            self.inp_postex_token.setText(postex_token)
+
     def _save_governor_settings(self):
         set_setting("send_min_delay_seconds", str(self.spn_min_delay.value()))
         set_setting("send_jitter_seconds", str(self.spn_jitter.value()))
@@ -341,6 +439,66 @@ class SettingsPage(QWidget):
         set_setting("human_takeover_enabled", "1" if self.tog_takeover.isChecked() else "0")
         set_setting("human_takeover_minutes", str(self.spn_takeover_mins.value()))
         QMessageBox.information(self, "Configuration Saved", "Automation & Filter controls saved successfully!")
+
+    def _toggle_token_visibility(self):
+        if self.inp_postex_token.echoMode() == QLineEdit.EchoMode.Password:
+            self.inp_postex_token.setEchoMode(QLineEdit.EchoMode.Normal)
+            self.btn_show_token.setText("🔒")
+        else:
+            self.inp_postex_token.setEchoMode(QLineEdit.EchoMode.Password)
+            self.btn_show_token.setText("👁️")
+
+    def _save_postex_settings(self):
+        token_str = self.inp_postex_token.text().strip()
+        is_enabled = "1" if self.tog_postex.isChecked() else "0"
+        
+        set_setting("postex_tracking_enabled", is_enabled)
+        if token_str:
+            store_secret("postex_api_token", token_str)
+            set_setting("postex_api_token", token_str)
+
+        QMessageBox.information(
+            self, "PostEx Settings Saved",
+            "PostEx Courier automated tracking settings saved successfully!"
+        )
+
+    def _test_postex_connection(self):
+        token_str = self.inp_postex_token.text().strip()
+        if not token_str:
+            QMessageBox.warning(self, "Missing Token", "Please paste your PostEx API Token first.")
+            return
+
+        self.btn_test_postex.setEnabled(False)
+        self.btn_test_postex.setText("⏳ Testing...")
+        self.lbl_postex_status.setText("Connecting to PostEx Merchant API...")
+        self.lbl_postex_status.setStyleSheet("color: #F59E0B;")
+
+        def worker():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                client = PostExClient(token=token_str)
+                ok, msg = loop.run_until_complete(client.test_connection(token=token_str))
+                loop.close()
+                self.postex_test_signal.emit(ok, msg)
+            except Exception as e:
+                loop.close()
+                self.postex_test_signal.emit(False, str(e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_postex_test_result(self, ok: bool, msg: str):
+        self.btn_test_postex.setEnabled(True)
+        self.btn_test_postex.setText("🔌 Test Connection")
+
+        if ok:
+            self.lbl_postex_status.setText(f"● {msg}")
+            self.lbl_postex_status.setStyleSheet("color: #22C55E; font-weight: 700;")
+            QMessageBox.information(self, "PostEx API Connected", f"✅ {msg}")
+        else:
+            self.lbl_postex_status.setText(f"● {msg}")
+            self.lbl_postex_status.setStyleSheet("color: #EF4444; font-weight: 700;")
+            QMessageBox.warning(self, "PostEx Connection Failed", f"❌ {msg}")
 
     def _launch_waha_action(self):
         url_str = self.txt_waha_url.text().strip() or "http://localhost:3000"
