@@ -141,10 +141,15 @@ def sanitize_ai_reply(reply: str) -> str:
     if lower_clean in _IGNORE_PHRASES:
         return ""
 
-    # 7. Check if text contains CANNOT_ANSWER or meta-response phrases
-    if "cannot_answer" in lower_clean or "cannot answer" in lower_clean:
+    # 7. Check if text contains CANNOT_ANSWER or meta-response phrases — anywhere in the reply.
+    #    Use the full lower_text (not just lower_clean) so we catch embedded variants like
+    #    "Return CANNOT_ANSWER", "The answer is CANNOT_ANSWER", or "cannot_answer." mid-sentence.
+    if "cannot_answer" in lower_text or "cannot answer" in lower_text:
+        logging.info(f"[sanitize] Blocked CANNOT_ANSWER token in reply: {text[:60]!r}")
         return ""
-    if "(no response)" in lower_clean or "[no response]" in lower_clean or "(no reply)" in lower_clean or "no response" == lower_clean:
+    if "(no response)" in lower_text or "[no response]" in lower_text or "(no reply)" in lower_text:
+        return ""
+    if lower_clean == "no response" or lower_clean == "no reply":
         return ""
 
     # 8. Prevent system prompt echoes (if model regurgitates prompt text)
