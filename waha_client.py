@@ -85,7 +85,7 @@ class WAHAClient:
                     return False
         return False
 
-    async def send_file(self, chat_id: str, local_path: str, mime_type: str, filename: str, caption: str = "", session: str = "default") -> bool:
+    async def send_file(self, chat_id: str, local_path: str, mime_type: str, filename: str, caption: str = "", session: str = "default", phone: str = "") -> bool:
         import asyncio
         base_url = self._get_base_url()
         url = f"{base_url}/api/sendFile"
@@ -98,7 +98,8 @@ class WAHAClient:
             "chatId": chat_id,
             "filePath": local_path,
             "caption": caption,
-            "session": session
+            "session": session,
+            "phone": phone
         }
 
         for attempt in range(2):

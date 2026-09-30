@@ -28,8 +28,9 @@ _IGNORE_PHRASES = {
 def sanitize_ai_reply(reply: str) -> str:
     """
     Sanitizes raw AI output.
-    Strips internal thinking blocks (<think>...</think>), reasoning scratchpads,
-    system prompt echoes, and filters out meta-responses like '(No response)' or 'CANNOT_ANSWER'.
+    Strips internal thinking blocks (<think>...</think>), orphaned closing tags (</think>),
+    reasoning scratchpads, system prompt echoes, and filters out meta-responses like '(No response)' or 'CANNOT_ANSWER'.
+    Also detects and blocks untagged chain-of-thought leaks from reasoning models (Nemotron, GPT-OSS, DeepSeek).
     Returns clean string to send to customer, or empty string "" to silently ignore.
     """
     if not reply or not reply.strip():
@@ -40,36 +41,121 @@ def sanitize_ai_reply(reply: str) -> str:
     # 1. Remove XML/HTML thinking tags: <think>...</think> or <reasoning>...</reasoning>
     text = re.sub(r"<(think|reasoning|thought|scratchpad)>.*?</\1>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
 
-    # 2. Strip leading reasoning lines like "Here's a thinking process:" or "We need to follow instructions:"
-    lower_start = text.lower()
-    if (lower_start.startswith("here's a thinking process") or 
-        lower_start.startswith("we need to follow instructions") or 
-        lower_start.startswith("thinking process:")):
+    # 2. Handle orphaned closing tags: if </think> or </reasoning> appears, everything before it was reasoning!
+    if re.search(r"</(?:think|reasoning|thought|scratchpad)>", text, flags=re.IGNORECASE):
+        parts = re.split(r"</(?:think|reasoning|thought|scratchpad)>", text, flags=re.IGNORECASE)
+        text = parts[-1].strip()
+
+    # 3. Handle orphaned opening tags: if <think> or <reasoning> is present without a closing tag, generation got cut off inside thought
+    if re.search(r"<(?:think|reasoning|thought|scratchpad)>", text, flags=re.IGNORECASE):
+        return ""
+
+    if not text:
+        return ""
+
+    lower_text = text.lower()
+
+    # 4. Detect untagged chain-of-thought / reasoning leaks from thinking models.
+    #    These models (Nemotron, GPT-OSS, DeepSeek) sometimes output their scratchpad as
+    #    plain text without any <think> tags. Detect by checking if the output contains
+    #    clear meta-analysis phrases that no real reply would ever contain.
+    untagged_reasoning_signals = (
+        # Referencing the system prompt / guidelines directly
+        "the guideline:",
+        "the guidelines:",
+        "guideline says",
+        "according to the guideline",
+        "according to guidelines",
+        "operating guidelines",
+        "pre-configured products",
+        "pre-configured answer",
+        "pre-configured answer:",
+        "system knowledge base",
+        # Reasoning about what to reply (not an actual reply)
+        "we could respond",
+        "we should respond",
+        "we can respond",
+        "we need to respond",
+        "we need to follow",
+        "we need to reply",
+        "we should reply",
+        "we should ignore",
+        "we can use the pre-",
+        "we must not invent",
+        "also we must not",
+        "also \"few days\"",
+        "the customer says it",
+        "the customer says they",
+        "they expected",
+        "they say it",
+        "with answer:",
+        "with answer: \"",
+        # Referencing rule names or rule contents verbatim
+        "few days\" with answer",
+        "\"few days ma aya ga\"",
+        "topic / product:",
+        "keyword_payload",
+        "response_message",
+        "rule_name",
+        "matching_operator",
+        # Thinking process markers
+        "here's a thinking process",
+        "thinking process:",
+        "chain of thought",
+        "let me think",
+        "let me reason",
+        "the customer is asking about",
+        "i need to check",
+        "i should check",
+    )
+
+    for signal in untagged_reasoning_signals:
+        if signal in lower_text:
+            logging.warning(f"[sanitize] Blocked untagged reasoning leak detected (signal: {signal!r}). Raw: {text[:80]!r}")
+            return ""
+
+    # 5. Strip leading reasoning lines or meta-reasoning scratchpads
+    lower_start = lower_text
+    reasoning_prefixes = (
+        "here's a thinking process",
+        "we need to follow",
+        "we need to respond",
+        "we should ignore",
+        "thinking process:",
+        "according to guidelines",
+        "the customer says",
+        "the customer is",
+        "let me think",
+        "let me reason",
+        "i need to check",
+    )
+    if any(lower_start.startswith(p) for p in reasoning_prefixes):
         match = re.search(r"(?:Thus answer:|Answer:|Final Reply:|Reply:)\s*[\"']?(.*?)[\"']?$", text, re.DOTALL | re.IGNORECASE)
         if match:
             text = match.group(1).strip()
         else:
             return ""
 
-    # 3. Check for exact ignore tokens
+    # 6. Check for exact ignore tokens
     lower_clean = text.lower().strip().strip("\"'.,;:")
     if lower_clean in _IGNORE_PHRASES:
         return ""
 
-    # 4. Check if text contains CANNOT_ANSWER or meta-response phrases
+    # 7. Check if text contains CANNOT_ANSWER or meta-response phrases
     if "cannot_answer" in lower_clean or "cannot answer" in lower_clean:
         return ""
     if "(no response)" in lower_clean or "[no response]" in lower_clean or "(no reply)" in lower_clean or "no response" == lower_clean:
         return ""
 
-    # 5. Prevent system prompt echoes (if model regurgitates prompt text)
-    if ("operating guidelines" in lower_clean or 
-        "pre-configured products & answers" in lower_clean or 
+    # 8. Prevent system prompt echoes (if model regurgitates prompt text)
+    if ("operating guidelines" in lower_clean or
+        "pre-configured products & answers" in lower_clean or
         "system knowledge base" in lower_clean or
         "pre-configured answer:" in lower_clean):
         return ""
 
     return text
+
 
 
 def build_llm_request(rules_context: str, context_box_text: str, sender_id: str, source_hint, inbound_body: str, model_id: str) -> dict:
@@ -87,7 +173,8 @@ def build_llm_request(rules_context: str, context_box_text: str, sender_id: str,
         "1. SEMANTIC INTENT MATCHING: Customers will ask questions in Roman Urdu (e.g. 'ha?', 'milega?', 'price kya ha?', 'customize shirt ha?'), Urdu, or English with typos or natural phrasing. If their message refers to any Topic / Product in the list below, provide that product's pre-configured details and price.\n"
         "2. NATURAL & POLITE: Reply politely in Roman Urdu or English matching the customer's language. Keep replies concise and formatted with WhatsApp bold (*bold*) where helpful.\n"
         "3. ACCURACY & GROUNDING: Use ONLY the information, pricing, and policies from the list below. Do not invent new prices or make up fake products.\n"
-        "4. UNRELATED INQUIRIES & SILENCE: If the customer sends an address, personal name, random chit-chat, or something unrelated to any topic in the list below, respond with ONLY the exact single word: CANNOT_ANSWER. Never output your internal thinking, chain of thought, explanations, or phrases like '(No response)'.\n\n"
+        "4. UNRELATED INQUIRIES & SILENCE: If the customer sends an address, personal name, random chit-chat, or something unrelated to any topic in the list below, respond with ONLY the exact single word: CANNOT_ANSWER. Never output your internal thinking, chain of thought, explanations, or phrases like '(No response)'.\n"
+        "5. CRITICAL — NO REASONING OUTPUT: You MUST output ONLY the final reply to send to the customer. NEVER output your thought process, analysis, guidelines references, rule names, or any meta-commentary. Do not write things like 'The customer says...', 'The guideline says...', 'We could respond with...', 'According to the rules...'. Output ONLY the actual message text.\n\n"
         "=== [PRE-CONFIGURED PRODUCTS & ANSWERS] ===\n"
         f"{rules_context}\n\n"
         "=== [ADDITIONAL KNOWLEDGE BASE] ===\n"
@@ -159,13 +246,14 @@ async def transcribe_audio_groq(audio_base64: str, mime_type: str = "audio/ogg")
         logging.warning(f"Groq Whisper transcription exception: {e}")
     return None
 
-
 async def generate_ai_response(
     sender_id: str,
     inbound_body: str,
     source_hint: Optional[str] = None,
     audio_base64: Optional[str] = None,
-    audio_mime_type: Optional[str] = None
+    audio_mime_type: Optional[str] = None,
+    session_name: Optional[str] = None,
+    conversation_history: Optional[List[Dict[str, str]]] = None
 ) -> str:
     """
     Generates AI response using a 3-Tier Multi-Provider Cascade:
@@ -173,6 +261,8 @@ async def generate_ai_response(
       Tier 2: OpenRouter Failover (Slot 4 - Llama 3.3 70B / DeepSeek)
       Tier 3: Groq Cloud Failover (Slot 5 - Llama 3.3 70B Versatile)
     For voice notes: automatically uses Groq Whisper Large V3 (0.3s transcription) with Gemini multimodal fallback.
+    conversation_history: Optional list of prior turns [{"role": "user"|"assistant", "content": "..."}]
+                          injected into all provider requests for contextual awareness.
     """
     _BEST_FREE_GEMINI_MODEL = "gemini-3.5-flash-lite"
 
@@ -189,11 +279,15 @@ async def generate_ai_response(
             inbound_body = transcript
             audio_base64 = None  # Now converted to text — 95% token savings & 100% provider compatibility!
 
-    # Fetch active rules to provide AI with live Rule Book context
+    # Fetch active rules to provide AI with live Rule Book context (filtered for current account)
     rules = get_all_rules()
     rules_lines = []
     for r in rules:
-        if r.get('is_enabled', 1):
+        if not r.get('is_enabled', 1):
+            continue
+        target = r.get('account_target', 'ALL')
+        # Include if global rule OR matches the current session
+        if not target or target.upper() == 'ALL' or (session_name and target == session_name):
             rules_lines.append(f"- Topic / Product: '{r['rule_name']}' | Keywords: {r['keyword_payload']} | Pre-configured Answer: \"{r['response_message']}\"")
     rules_context = "\n".join(rules_lines) if rules_lines else "No static rules configured."
     context_text = get_setting("ai_system_context", "")
@@ -242,8 +336,23 @@ async def generate_ai_response(
             gen_config["temperature"] = 0.4
             gen_config["max_output_tokens"] = 350
 
+        # Build Gemini contents array — inject conversation history for text-mode requests.
+        # NOTE: Gemini uses "model" role (not "assistant"). History is skipped for voice/audio
+        # because the multimodal format uses inline binary data, not plain-text turns.
+        if conversation_history and not audio_base64:
+            gemini_contents = []
+            for turn in conversation_history:
+                gemini_role = "model" if turn["role"] == "assistant" else "user"
+                gemini_contents.append({
+                    "role": gemini_role,
+                    "parts": [{"text": turn["content"]}]
+                })
+            gemini_contents.append({"role": "user", "parts": user_parts})
+        else:
+            gemini_contents = [{"role": "user", "parts": user_parts}]
+
         gemini_body = {
-            "contents": [{"role": "user", "parts": user_parts}],
+            "contents": gemini_contents,
             "systemInstruction": {"parts": [{"text": sys_text}]},
             "generationConfig": gen_config
         }
@@ -302,12 +411,18 @@ async def generate_ai_response(
         or_model = get_setting("openrouter_model_name", "nvidia/nemotron-3-super-120b-a12b:free").strip() or "nvidia/nemotron-3-super-120b-a12b:free"
         logging.info(f"🔄 Cascading to Tier 2: OpenRouter Failover (Slot 4, Model: {or_model})...")
         req_payload = build_llm_request(rules_context, context_text, sender_id, source_hint, inbound_body, or_model)
+
+        # Build OpenRouter messages with conversation history injected.
+        # OpenRouter/Groq use OpenAI-compatible format — "user"/"assistant" roles are correct as-is.
+        or_messages = [{"role": "system", "content": req_payload["system_instruction"]}]
+        if conversation_history:
+            for turn in conversation_history:
+                or_messages.append({"role": turn["role"], "content": turn["content"]})
+        or_messages.append({"role": "user", "content": req_payload["messages"][0]["content"]})
+
         or_body = {
             "model": or_model,
-            "messages": [
-                {"role": "system", "content": req_payload["system_instruction"]},
-                {"role": "user", "content": req_payload["messages"][0]["content"]}
-            ],
+            "messages": or_messages,
             "max_tokens": 350,
             "temperature": 0.2
         }
@@ -349,12 +464,17 @@ async def generate_ai_response(
         groq_model = get_setting("groq_model_name", "openai/gpt-oss-20b").strip() or "openai/gpt-oss-20b"
         logging.info(f"🔄 Cascading to Tier 3: Groq Cloud Failover (Slot 5, Model: {groq_model})...")
         req_payload = build_llm_request(rules_context, context_text, sender_id, source_hint, inbound_body, groq_model)
+
+        # Build Groq messages with conversation history injected (same OpenAI-compatible format as OpenRouter).
+        groq_messages = [{"role": "system", "content": req_payload["system_instruction"]}]
+        if conversation_history:
+            for turn in conversation_history:
+                groq_messages.append({"role": turn["role"], "content": turn["content"]})
+        groq_messages.append({"role": "user", "content": req_payload["messages"][0]["content"]})
+
         groq_body = {
             "model": groq_model,
-            "messages": [
-                {"role": "system", "content": req_payload["system_instruction"]},
-                {"role": "user", "content": req_payload["messages"][0]["content"]}
-            ],
+            "messages": groq_messages,
             "max_tokens": 350,
             "temperature": 0.2
         }

@@ -127,6 +127,7 @@ class MainWindow(QMainWindow):
     def refresh_rules_matrix(self):
         rules = db.get_all_rules()
         self.page_rules.rule_registry.display_rules(rules)
+        self.page_rules.rule_editor.refresh_accounts_dropdown()
         self.page_dashboard.refresh_metrics()
 
     def _refresh_live_metrics(self):
@@ -177,7 +178,8 @@ class MainWindow(QMainWindow):
             keyword=rule_data["keyword_payload"],
             response=rule_data["response_message"],
             is_enabled=rule_data["is_enabled"],
-            attachments=rule_data.get("attachments")
+            attachments=rule_data.get("attachments"),
+            account_target=rule_data.get("account_target", "ALL")
         )
         self.refresh_rules_matrix()
 
@@ -189,7 +191,8 @@ class MainWindow(QMainWindow):
             keyword=rule_data["keyword_payload"],
             response=rule_data["response_message"],
             is_enabled=rule_data["is_enabled"],
-            attachments=rule_data.get("attachments")
+            attachments=rule_data.get("attachments"),
+            account_target=rule_data.get("account_target", "ALL")
         )
         self.refresh_rules_matrix()
 
@@ -209,7 +212,8 @@ class MainWindow(QMainWindow):
                 keyword=r.get("keyword_payload", ""),
                 response=r.get("response_message", ""),
                 is_enabled=r.get("is_enabled", 1),
-                attachments=r.get("attachments")
+                attachments=r.get("attachments"),
+                account_target=r.get("account_target", "ALL")
             )
         self.refresh_rules_matrix()
 

@@ -37,6 +37,16 @@ class RuleEditorWidget(QGroupBox):
         v1.addWidget(self.txt_rule_name)
         row1.addLayout(v1, stretch=2)
 
+        v_acc = QVBoxLayout()
+        v_acc.setSpacing(4)
+        lbl_acc = QLabel("TARGET ACCOUNT:")
+        lbl_acc.setStyleSheet("font-weight: 700; font-size: 11px; color: #94A3B8;")
+        v_acc.addWidget(lbl_acc)
+        self.cmb_account = QComboBox()
+        self.cmb_account.setMinimumWidth(180)
+        v_acc.addWidget(self.cmb_account)
+        row1.addLayout(v_acc, stretch=2)
+
         v2 = QVBoxLayout()
         v2.setSpacing(4)
         lbl_op = QLabel("OPERATOR:")
@@ -58,6 +68,7 @@ class RuleEditorWidget(QGroupBox):
         row1.addLayout(v3, stretch=2)
 
         layout.addLayout(row1)
+        self.refresh_accounts_dropdown()
 
         # Response Message Editor & Toolbar
         lbl_resp = QLabel("RESPONSE MESSAGE TEMPLATE (Supports Emojis & Bold Format):")
@@ -189,6 +200,31 @@ class RuleEditorWidget(QGroupBox):
             self.tbl_attachments.setItem(row, 1, QTableWidgetItem(att["mime_type"]))
             self.tbl_attachments.setItem(row, 2, QTableWidgetItem(att.get("media_caption", "")))
 
+    def refresh_accounts_dropdown(self):
+        import database as db
+        current_target = self.cmb_account.currentData() if hasattr(self, 'cmb_account') and self.cmb_account.count() > 0 else 'ALL'
+        self.cmb_account.blockSignals(True)
+        self.cmb_account.clear()
+        self.cmb_account.addItem("🌐 All Accounts (Global)", "ALL")
+
+        try:
+            accounts = db.get_all_accounts()
+            for acc in accounts:
+                session_name = acc.get("session_name", "")
+                alias = acc.get("account_alias") or session_name
+                if session_name:
+                    self.cmb_account.addItem(f"📱 {alias} ({session_name})", session_name)
+        except Exception:
+            pass
+
+        # Restore previously selected item if possible
+        idx = self.cmb_account.findData(current_target)
+        if idx >= 0:
+            self.cmb_account.setCurrentIndex(idx)
+        else:
+            self.cmb_account.setCurrentIndex(0)
+        self.cmb_account.blockSignals(False)
+
     def load_rule_for_edit(self, rule: dict):
         self.editing_rule_id = rule["id"]
         self.txt_rule_name.setText(rule["rule_name"])
@@ -197,6 +233,16 @@ class RuleEditorWidget(QGroupBox):
         self.txt_response.setText(rule["response_message"])
         self.attachments = list(rule.get("attachments", []))
         self._refresh_attachments_table()
+
+        # Set target account
+        target = rule.get("account_target", "ALL") or "ALL"
+        idx = self.cmb_account.findData(target)
+        if idx >= 0:
+            self.cmb_account.setCurrentIndex(idx)
+        else:
+            # If account is not in current active list, add it temporarily so it displays accurately
+            self.cmb_account.addItem(f"📱 {target} (Saved)", target)
+            self.cmb_account.setCurrentIndex(self.cmb_account.count() - 1)
 
         self.setTitle(f"⚡ EDITING RULE #{rule['id']} — {rule['rule_name']}")
         self.btn_save.setText(f"💾 Save Modifications (Rule #{rule['id']})")
@@ -210,6 +256,7 @@ class RuleEditorWidget(QGroupBox):
         self.txt_rule_name.clear()
         self.txt_keyword.clear()
         self.txt_response.clear()
+        self.cmb_account.setCurrentIndex(0)
         self.attachments.clear()
         self._refresh_attachments_table()
         self.btn_save.setText("Add Rule Configuration")
@@ -224,6 +271,7 @@ class RuleEditorWidget(QGroupBox):
         operator = self.cmb_operator.currentText()
         keyword = self.txt_keyword.text().strip()
         response = self.txt_response.toPlainText().strip()
+        account_target = self.cmb_account.currentData() or "ALL"
 
         if not name or not keyword or not response:
             QMessageBox.warning(self, "Validation Error", "Rule Name, Keyword, and Response Message are required!")
@@ -234,6 +282,7 @@ class RuleEditorWidget(QGroupBox):
             "matching_operator": operator,
             "keyword_payload": keyword,
             "response_message": response,
+            "account_target": account_target,
             "is_enabled": 1,
             "attachments": self.attachments
         }

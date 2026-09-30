@@ -22,6 +22,18 @@ class AISettingsWidget(QGroupBox):
         self.chk_ai_enabled.stateChanged.connect(self._save_settings)
         layout.addWidget(self.chk_ai_enabled)
 
+        # Conversation Memory Toggle Checkbox
+        self.chk_context_enabled = QCheckBox("🧠 Enable Conversation Memory  (Remember last 3 messages per customer for context-aware replies)")
+        self.chk_context_enabled.setStyleSheet("font-weight: 600; color: #A78BFA;")
+        self.chk_context_enabled.setToolTip(
+            "When enabled, the AI remembers the last 3 exchanges (customer + bot) per chat.\n"
+            "This allows the AI to understand follow-up questions and reply in context.\n"
+            "History is isolated per customer and expires after 24 hours of inactivity.\n"
+            "Safe to use at high message volume — different customer chats never mix."
+        )
+        self.chk_context_enabled.stateChanged.connect(self._save_settings)
+        layout.addWidget(self.chk_context_enabled)
+
         # Provider & Model ID Row
         row1 = QHBoxLayout()
         row1.setSpacing(10)
@@ -98,6 +110,9 @@ class AISettingsWidget(QGroupBox):
         ai_on = get_setting("ai_fallback_enabled", "0") == "1"
         self.chk_ai_enabled.setChecked(ai_on)
 
+        context_on = get_setting("ai_context_enabled", "1") == "1"
+        self.chk_context_enabled.setChecked(context_on)
+
         provider = get_setting("ai_provider", "gemini").lower()
         for i in range(self.cmb_provider.count()):
             if self.cmb_provider.itemText(i).lower() == provider:
@@ -126,6 +141,7 @@ class AISettingsWidget(QGroupBox):
 
     def _save_settings(self):
         set_setting("ai_fallback_enabled", "1" if self.chk_ai_enabled.isChecked() else "0")
+        set_setting("ai_context_enabled", "1" if self.chk_context_enabled.isChecked() else "0")
         set_setting("ai_provider", self.cmb_provider.currentText().lower())
         set_setting("ai_model_name", self.txt_model_id.text().strip() or "gemini-3.5-flash")
 

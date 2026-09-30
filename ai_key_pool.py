@@ -45,41 +45,49 @@ class AIKeyPool:
     def get_configured_keys(self) -> List[dict]:
         """
         Returns status for all 5 slots:
-        [{'slot': 1, 'ref': 'nexus_ai_key', 'name': 'Gemini Key 1', 'key': 'AIza...', 'masked': 'AIza...XXXX', 'rate_limited': False}, ...]
+        [{'slot': 1, 'ref': 'nexus_ai_key', 'name': 'Gemini Key 1', 'key': 'AIza...', 'masked': 'AIza...XXXX', 'rate_limited': False, 'is_enabled': True}, ...]
         """
         now = time.time()
         result = []
         for item in ALL_KEY_REFS:
+            slot = item["slot"]
             ref = item["ref"]
             key_val = retrieve_secret(ref)
             clean_k = key_val.strip() if key_val else ""
             masked = f"{clean_k[:6]}...{clean_k[-4:]}" if len(clean_k) > 10 else ("***" if clean_k else "Not Configured")
             is_limited = now < self._rate_limited_until.get(clean_k, 0.0) if clean_k else False
+            is_enabled = get_setting(f"ai_slot_{slot}_enabled", "1") == "1"
             result.append({
-                "slot": item["slot"],
+                "slot": slot,
                 "ref": ref,
                 "name": item["name"],
                 "provider": item["provider"],
                 "key": clean_k,
                 "masked": masked,
                 "rate_limited": is_limited,
-                "is_active": bool(clean_k)
+                "is_active": bool(clean_k),
+                "is_enabled": is_enabled
             })
         return result
 
     def get_all_active_keys(self) -> List[str]:
-        """Returns list of all non-empty API keys across all slots."""
+        """Returns list of all non-empty, enabled API keys across all slots."""
         keys = []
         for item in ALL_KEY_REFS:
+            slot = item["slot"]
+            if get_setting(f"ai_slot_{slot}_enabled", "1") != "1":
+                continue
             k = retrieve_secret(item["ref"])
             if k and k.strip():
                 keys.append(k.strip())
         return keys
 
     def get_gemini_keys(self) -> List[str]:
-        """Returns non-empty Gemini keys from Slots 1, 2, 3."""
+        """Returns non-empty, enabled Gemini keys from Slots 1, 2, 3."""
         keys = []
-        for ref in GEMINI_KEY_REFS:
+        for slot, ref in enumerate(GEMINI_KEY_REFS, start=1):
+            if get_setting(f"ai_slot_{slot}_enabled", "1") != "1":
+                continue
             k = retrieve_secret(ref)
             if k and k.strip():
                 keys.append(k.strip())
@@ -102,7 +110,9 @@ class AIKeyPool:
             return usable[self._gemini_index]
 
     def get_openrouter_key(self) -> Optional[str]:
-        """Returns Slot 4 OpenRouter key if configured and not rate-limited."""
+        """Returns Slot 4 OpenRouter key if enabled, configured, and not rate-limited."""
+        if get_setting("ai_slot_4_enabled", "1") != "1":
+            return None
         k = retrieve_secret(OPENROUTER_KEY_REF)
         if k and k.strip():
             clean_k = k.strip()
@@ -111,7 +121,9 @@ class AIKeyPool:
         return None
 
     def get_groq_key(self) -> Optional[str]:
-        """Returns Slot 5 Groq Cloud key if configured and not rate-limited."""
+        """Returns Slot 5 Groq Cloud key if enabled, configured, and not rate-limited."""
+        if get_setting("ai_slot_5_enabled", "1") != "1":
+            return None
         k = retrieve_secret(GROQ_KEY_REF)
         if k and k.strip():
             clean_k = k.strip()

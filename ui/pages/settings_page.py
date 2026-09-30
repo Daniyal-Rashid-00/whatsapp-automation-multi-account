@@ -1,30 +1,61 @@
-import asyncio
-import threading
 from urllib.parse import urlparse
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox,
-    QPushButton, QMessageBox, QFrame, QLineEdit
+    QPushButton, QMessageBox, QFrame, QLineEdit, QScrollArea, QTableWidget,
+    QTableWidgetItem, QHeaderView, QComboBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal
-from database import get_setting, set_setting
+from PyQt6.QtCore import Qt
+from database import (
+    get_setting, set_setting, get_all_accounts,
+    add_excluded_number, remove_excluded_number, get_all_excluded_numbers
+)
 from vault import store_secret, retrieve_secret
-from ui.theme import COLOR_AMBER_ALERT
+from ui.theme import COLOR_AMBER_ALERT, COLOR_DARK_BG
 from ui.widgets.toggle_switch import ToggleSwitch
 from waha_launcher import WAHALauncher
-from postex_client import PostExClient
 
 
 class SettingsPage(QWidget):
-    postex_test_signal = pyqtSignal(bool, str)
-
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        self.postex_test_signal.connect(self._on_postex_test_result)
+        # Root layout holding the responsive scroll area
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
 
-        layout = QVBoxLayout(self)
+        # Smooth Scroll Area ensuring 100% responsiveness on any resolution
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(f"""
+            QScrollArea {{
+                background-color: transparent;
+                border: none;
+            }}
+            QScrollBar:vertical {{
+                background: {COLOR_DARK_BG};
+                width: 8px;
+                margin: 0px;
+                border-radius: 4px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: #21262D;
+                min-height: 20px;
+                border-radius: 4px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: #30363D;
+            }}
+        """)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(16)
+        scroll.setWidget(container)
+        root_layout.addWidget(scroll)
 
         # Page Header
         hdr_layout = QHBoxLayout()
@@ -262,88 +293,181 @@ class SettingsPage(QWidget):
 
         layout.addWidget(card_safety)
 
-        # =====================================================================
-        # 4. PostEx Courier Automated Parcel Tracking Integration Card
-        # =====================================================================
-        card_postex = QFrame()
-        card_postex.setObjectName("cardFrame")
-        postex_layout = QVBoxLayout(card_postex)
-        postex_layout.setContentsMargins(18, 18, 18, 18)
-        postex_layout.setSpacing(12)
+        # 4. Ignored Numbers / Do Not Automate Frame
+        card_ignored = QFrame()
+        card_ignored.setObjectName("cardFrame")
+        ign_layout = QVBoxLayout(card_ignored)
+        ign_layout.setContentsMargins(18, 18, 18, 18)
+        ign_layout.setSpacing(14)
 
-        # Title Row with Master Toggle
-        row_p_title = QHBoxLayout()
-        lbl_p_title = QLabel("📦 PostEx Courier Automated Parcel Tracking")
-        lbl_p_title.setStyleSheet("font-size: 14px; font-weight: 700; color: #F0F6FC;")
-        row_p_title.addWidget(lbl_p_title)
-        row_p_title.addStretch()
+        # Header with Title and Master Toggle
+        ign_hdr = QHBoxLayout()
+        ign_hdr.setSpacing(14)
 
-        self.tog_postex = ToggleSwitch(checked=True)
-        row_p_title.addWidget(self.tog_postex)
-        postex_layout.addLayout(row_p_title)
+        v_ign_title = QVBoxLayout()
+        v_ign_title.setSpacing(2)
+        lbl_ign_title = QLabel("🛡️ Ignored Numbers / Do Not Automate")
+        lbl_ign_title.setStyleSheet("font-size: 14px; font-weight: 700; color: #F0F6FC;")
+        v_ign_title.addWidget(lbl_ign_title)
 
-        lbl_p_desc = QLabel(
-            "Automatically queries PostEx APIs and replies to customer parcel inquiries on WhatsApp with live status.\n"
-            "Recognizes Order IDs from saved contacts (e.g. '2250', '121012') and message text. Gracefully skips TCS and unbooked orders."
-        )
-        lbl_p_desc.setStyleSheet("font-size: 12px; color: #8B949E; line-height: 1.4;")
-        postex_layout.addWidget(lbl_p_desc)
+        lbl_ign_sub = QLabel("Inbound messages from these phone numbers will be completely ignored (no auto-replies or AI responses). Perfect for employers, personal numbers, staff, or suppliers.")
+        lbl_ign_sub.setStyleSheet("font-size: 11px; color: #8B949E;")
+        lbl_ign_sub.setWordWrap(True)
+        v_ign_title.addWidget(lbl_ign_sub)
+        ign_hdr.addLayout(v_ign_title, stretch=1)
 
-        # Token Input Row
-        row_token = QHBoxLayout()
-        row_token.setSpacing(10)
+        v_tog = QVBoxLayout()
+        v_tog.setSpacing(4)
+        lbl_tog_state = QLabel("FILTER STATUS:")
+        lbl_tog_state.setStyleSheet("font-weight: 600; font-size: 10px; color: #8B949E;")
+        v_tog.addWidget(lbl_tog_state, alignment=Qt.AlignmentFlag.AlignRight)
+        self.tog_ignored_numbers = ToggleSwitch(checked=True)
+        self.tog_ignored_numbers.stateChanged.connect(self._on_ignored_toggle_changed)
+        v_tog.addWidget(self.tog_ignored_numbers, alignment=Qt.AlignmentFlag.AlignRight)
+        ign_hdr.addLayout(v_tog)
 
-        v_tok = QVBoxLayout()
-        v_tok.setSpacing(4)
-        lbl_tok = QLabel("POSTEX MERCHANT API TOKEN:")
-        lbl_tok.setStyleSheet("font-weight: 600; font-size: 11px; color: #8B949E;")
-        v_tok.addWidget(lbl_tok)
+        ign_layout.addLayout(ign_hdr)
 
-        row_inp = QHBoxLayout()
-        self.inp_postex_token = QLineEdit()
-        self.inp_postex_token.setEchoMode(QLineEdit.EchoMode.Password)
-        self.inp_postex_token.setPlaceholderText("Paste your PostEx API Token from merchant portal...")
-        self.inp_postex_token.setStyleSheet("""
+        # Divider line
+        div_ign = QFrame()
+        div_ign.setFixedHeight(1)
+        div_ign.setStyleSheet("background-color: #21262D; border: none;")
+        ign_layout.addWidget(div_ign)
+
+        # Input Form Row
+        form_row = QHBoxLayout()
+        form_row.setSpacing(10)
+
+        # 1. Phone Number Input
+        v_inp_phone = QVBoxLayout()
+        v_inp_phone.setSpacing(4)
+        lbl_f_phone = QLabel("PHONE NUMBER:")
+        lbl_f_phone.setStyleSheet("font-weight: 600; font-size: 11px; color: #8B949E;")
+        v_inp_phone.addWidget(lbl_f_phone)
+        self.txt_ign_phone = QLineEdit()
+        self.txt_ign_phone.setPlaceholderText("e.g. 0300 1234567 or +923001234567")
+        self.txt_ign_phone.setStyleSheet("""
             QLineEdit {
                 background-color: #0D1117;
                 border: 1px solid #30363D;
                 border-radius: 6px;
-                padding: 8px 12px;
+                padding: 7px 10px;
                 color: #F0F6FC;
                 font-size: 12px;
             }
+            QLineEdit:focus {
+                border: 1px solid #3B82F6;
+            }
         """)
-        row_inp.addWidget(self.inp_postex_token, stretch=1)
+        v_inp_phone.addWidget(self.txt_ign_phone)
+        form_row.addLayout(v_inp_phone, stretch=3)
 
-        self.btn_show_token = QPushButton("👁️")
-        self.btn_show_token.setFixedWidth(36)
-        self.btn_show_token.setFixedHeight(34)
-        self.btn_show_token.setObjectName("btnSecondary")
-        self.btn_show_token.clicked.connect(self._toggle_token_visibility)
-        row_inp.addWidget(self.btn_show_token)
+        # 2. Label / Note Input
+        v_inp_lbl = QVBoxLayout()
+        v_inp_lbl.setSpacing(4)
+        lbl_f_tag = QLabel("LABEL / NOTE:")
+        lbl_f_tag.setStyleSheet("font-weight: 600; font-size: 11px; color: #8B949E;")
+        v_inp_lbl.addWidget(lbl_f_tag)
+        self.txt_ign_label = QLineEdit()
+        self.txt_ign_label.setPlaceholderText("e.g. Boss / Personal Phone")
+        self.txt_ign_label.setStyleSheet("""
+            QLineEdit {
+                background-color: #0D1117;
+                border: 1px solid #30363D;
+                border-radius: 6px;
+                padding: 7px 10px;
+                color: #F0F6FC;
+                font-size: 12px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #3B82F6;
+            }
+        """)
+        v_inp_lbl.addWidget(self.txt_ign_label)
+        form_row.addLayout(v_inp_lbl, stretch=3)
 
-        v_tok.addLayout(row_inp)
-        row_token.addLayout(v_tok, stretch=3)
+        # 3. Applies To Dropdown
+        v_inp_tgt = QVBoxLayout()
+        v_inp_tgt.setSpacing(4)
+        lbl_f_tgt = QLabel("APPLIES TO:")
+        lbl_f_tgt.setStyleSheet("font-weight: 600; font-size: 11px; color: #8B949E;")
+        v_inp_tgt.addWidget(lbl_f_tgt)
+        self.cmb_ign_target = QComboBox()
+        self.cmb_ign_target.setStyleSheet("""
+            QComboBox {
+                background-color: #0D1117;
+                border: 1px solid #30363D;
+                border-radius: 6px;
+                padding: 6px 10px;
+                color: #F0F6FC;
+                font-size: 12px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #161B22;
+                color: #F0F6FC;
+                selection-background-color: #1F6FEB;
+            }
+        """)
+        self._refresh_account_dropdown()
+        v_inp_tgt.addWidget(self.cmb_ign_target)
+        form_row.addLayout(v_inp_tgt, stretch=2)
 
-        self.btn_test_postex = QPushButton("🔌 Test Connection")
-        self.btn_test_postex.setObjectName("btnSecondary")
-        self.btn_test_postex.setFixedHeight(34)
-        self.btn_test_postex.clicked.connect(self._test_postex_connection)
-        row_token.addWidget(self.btn_test_postex)
+        # 4. Add Button
+        btn_add_num = QPushButton("+ Add Number")
+        btn_add_num.setObjectName("btnPrimary")
+        btn_add_num.setFixedHeight(34)
+        btn_add_num.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_add_num.clicked.connect(self._add_excluded_number_clicked)
+        form_row.addWidget(btn_add_num, alignment=Qt.AlignmentFlag.AlignBottom)
 
-        self.btn_save_postex = QPushButton("Save PostEx Settings")
-        self.btn_save_postex.setObjectName("btnPrimary")
-        self.btn_save_postex.setFixedHeight(34)
-        self.btn_save_postex.clicked.connect(self._save_postex_settings)
-        row_token.addWidget(self.btn_save_postex)
+        ign_layout.addLayout(form_row)
 
-        postex_layout.addLayout(row_token)
+        # Excluded Numbers Interactive Table
+        self.tbl_ignored = QTableWidget()
+        self.tbl_ignored.setColumnCount(5)
+        self.tbl_ignored.setHorizontalHeaderLabels([
+            "PHONE NUMBER", "LABEL / NOTE", "APPLIES TO", "ADDED DATE", "ACTION"
+        ])
+        self.tbl_ignored.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_ignored.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.tbl_ignored.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.tbl_ignored.setColumnWidth(2, 140)
+        self.tbl_ignored.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.tbl_ignored.setColumnWidth(3, 140)
+        self.tbl_ignored.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        self.tbl_ignored.setColumnWidth(4, 95)
+        self.tbl_ignored.verticalHeader().setVisible(False)
+        self.tbl_ignored.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.tbl_ignored.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.tbl_ignored.setMinimumHeight(140)
+        self.tbl_ignored.setMaximumHeight(260)
+        self.tbl_ignored.setStyleSheet("""
+            QTableWidget {
+                background-color: #0D1117;
+                border: 1px solid #30363D;
+                border-radius: 6px;
+                gridline-color: #21262D;
+                color: #F0F6FC;
+            }
+            QHeaderView::section {
+                background-color: #161B22;
+                color: #8B949E;
+                font-weight: 700;
+                font-size: 10px;
+                border: none;
+                border-bottom: 1px solid #30363D;
+                padding: 6px;
+            }
+        """)
+        ign_layout.addWidget(self.tbl_ignored)
 
-        self.lbl_postex_status = QLabel("")
-        self.lbl_postex_status.setStyleSheet("font-size: 11px; font-weight: 600; padding: 2px;")
-        postex_layout.addWidget(self.lbl_postex_status)
+        # Empty State Label
+        self.lbl_ign_empty = QLabel("No numbers currently excluded. All inbound customer chats are eligible for automation.")
+        self.lbl_ign_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_ign_empty.setStyleSheet("color: #8B949E; font-size: 12px; font-style: italic; padding: 12px;")
+        ign_layout.addWidget(self.lbl_ign_empty)
 
-        layout.addWidget(card_postex)
+        layout.addWidget(card_ignored)
 
         # 5. Compliance & Risk Notice Frame
         warn_frame = QFrame()
@@ -372,6 +496,136 @@ class SettingsPage(QWidget):
         layout.addStretch()
 
         self.load_settings()
+        self._load_excluded_numbers()
+
+    def _refresh_account_dropdown(self):
+        """Populates the target account dropdown dynamically from database accounts."""
+        self.cmb_ign_target.clear()
+        self.cmb_ign_target.addItem("All Accounts (Global)", "ALL")
+        try:
+            accounts = get_all_accounts()
+            for acc in accounts:
+                s_name = acc.get("session_name", "")
+                alias = acc.get("account_alias") or s_name
+                if s_name:
+                    self.cmb_ign_target.addItem(f"{alias} ({s_name})", s_name)
+        except Exception:
+            pass
+
+    def _load_excluded_numbers(self):
+        """Loads excluded numbers from database and renders them into the table."""
+        try:
+            records = get_all_excluded_numbers()
+        except Exception:
+            records = []
+
+        self.tbl_ignored.setRowCount(len(records))
+
+        if not records:
+            self.tbl_ignored.setVisible(False)
+            self.lbl_ign_empty.setVisible(True)
+            return
+
+        self.tbl_ignored.setVisible(True)
+        self.lbl_ign_empty.setVisible(False)
+
+        for row_idx, rec in enumerate(records):
+            num_id = rec.get("id")
+            phone = rec.get("phone_number", "")
+            raw = rec.get("raw_input") or phone
+            label_txt = rec.get("label") or "—"
+            target = rec.get("account_target") or "ALL"
+            created_at = str(rec.get("created_at") or "")[:16]
+
+            # 0. Phone Item
+            item_phone = QTableWidgetItem(f"+{phone}" if not phone.startswith("+") else phone)
+            item_phone.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+            item_phone.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            item_phone.setToolTip(f"Raw Input: {raw}")
+            self.tbl_ignored.setItem(row_idx, 0, item_phone)
+
+            # 1. Label Item
+            item_lbl = QTableWidgetItem(label_txt)
+            item_lbl.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+            item_lbl.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            if label_txt != "—":
+                item_lbl.setForeground(Qt.GlobalColor.white)
+            else:
+                item_lbl.setForeground(Qt.GlobalColor.gray)
+            self.tbl_ignored.setItem(row_idx, 1, item_lbl)
+
+            # 2. Applies To Item
+            target_display = "🌐 All Accounts" if target == "ALL" else f"📱 {target}"
+            item_tgt = QTableWidgetItem(target_display)
+            item_tgt.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item_tgt.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.tbl_ignored.setItem(row_idx, 2, item_tgt)
+
+            # 3. Added Date Item
+            item_date = QTableWidgetItem(created_at)
+            item_date.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item_date.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            item_date.setForeground(Qt.GlobalColor.gray)
+            self.tbl_ignored.setItem(row_idx, 3, item_date)
+
+            # 4. Action (Delete Button)
+            btn_delete = QPushButton("🗑️ Remove")
+            btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_delete.setStyleSheet("""
+                QPushButton {
+                    background-color: #21262D;
+                    color: #F85149;
+                    border: 1px solid #30363D;
+                    border-radius: 4px;
+                    padding: 3px 8px;
+                    font-size: 11px;
+                    font-weight: 600;
+                }
+                QPushButton:hover {
+                    background-color: #4C0519;
+                    color: #FECDD3;
+                    border: 1px solid #F43F5E;
+                }
+            """)
+            btn_delete.clicked.connect(lambda _, nid=num_id, r=raw: self._remove_excluded_number_clicked(nid, r))
+            self.tbl_ignored.setCellWidget(row_idx, 4, btn_delete)
+            self.tbl_ignored.setRowHeight(row_idx, 34)
+
+    def _add_excluded_number_clicked(self):
+        raw_phone = self.txt_ign_phone.text().strip()
+        if not raw_phone:
+            QMessageBox.warning(self, "Missing Phone Number", "Please enter a phone number to exclude.")
+            self.txt_ign_phone.setFocus()
+            return
+
+        label = self.txt_ign_label.text().strip()
+        target = self.cmb_ign_target.currentData() or "ALL"
+
+        success, msg = add_excluded_number(raw_phone, label=label, account_target=target)
+        if success:
+            self.txt_ign_phone.clear()
+            self.txt_ign_label.clear()
+            self._load_excluded_numbers()
+        else:
+            QMessageBox.warning(self, "Cannot Add Number", msg)
+
+    def _remove_excluded_number_clicked(self, number_id: int, raw_num: str):
+        reply = QMessageBox.question(
+            self,
+            "Remove Excluded Number",
+            f"Are you sure you want to remove '{raw_num}' from the exclusion list?\nAutomated replies will resume for this number.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            success = remove_excluded_number(number_id)
+            if success:
+                self._load_excluded_numbers()
+            else:
+                QMessageBox.warning(self, "Error", "Could not remove number from database.")
+
+    def _on_ignored_toggle_changed(self, checked: bool):
+        set_setting("ignored_numbers_enabled", "1" if checked else "0")
 
     def load_settings(self):
         try:
@@ -407,11 +661,8 @@ class SettingsPage(QWidget):
         except ValueError:
             pass
 
-        # PostEx Settings
-        self.tog_postex.setChecked(get_setting("postex_tracking_enabled", "1") == "1")
-        postex_token = retrieve_secret("postex_api_token") or get_setting("postex_api_token", "")
-        if postex_token:
-            self.inp_postex_token.setText(postex_token)
+        self.tog_ignored_numbers.setChecked(get_setting("ignored_numbers_enabled", "1") == "1")
+        self._refresh_account_dropdown()
 
     def _save_governor_settings(self):
         set_setting("send_min_delay_seconds", str(self.spn_min_delay.value()))
@@ -438,67 +689,8 @@ class SettingsPage(QWidget):
         set_setting("cooldown_minutes", str(self.spn_cooldown_mins.value()))
         set_setting("human_takeover_enabled", "1" if self.tog_takeover.isChecked() else "0")
         set_setting("human_takeover_minutes", str(self.spn_takeover_mins.value()))
+        set_setting("ignored_numbers_enabled", "1" if self.tog_ignored_numbers.isChecked() else "0")
         QMessageBox.information(self, "Configuration Saved", "Automation & Filter controls saved successfully!")
-
-    def _toggle_token_visibility(self):
-        if self.inp_postex_token.echoMode() == QLineEdit.EchoMode.Password:
-            self.inp_postex_token.setEchoMode(QLineEdit.EchoMode.Normal)
-            self.btn_show_token.setText("🔒")
-        else:
-            self.inp_postex_token.setEchoMode(QLineEdit.EchoMode.Password)
-            self.btn_show_token.setText("👁️")
-
-    def _save_postex_settings(self):
-        token_str = self.inp_postex_token.text().strip()
-        is_enabled = "1" if self.tog_postex.isChecked() else "0"
-        
-        set_setting("postex_tracking_enabled", is_enabled)
-        if token_str:
-            store_secret("postex_api_token", token_str)
-            set_setting("postex_api_token", token_str)
-
-        QMessageBox.information(
-            self, "PostEx Settings Saved",
-            "PostEx Courier automated tracking settings saved successfully!"
-        )
-
-    def _test_postex_connection(self):
-        token_str = self.inp_postex_token.text().strip()
-        if not token_str:
-            QMessageBox.warning(self, "Missing Token", "Please paste your PostEx API Token first.")
-            return
-
-        self.btn_test_postex.setEnabled(False)
-        self.btn_test_postex.setText("⏳ Testing...")
-        self.lbl_postex_status.setText("Connecting to PostEx Merchant API...")
-        self.lbl_postex_status.setStyleSheet("color: #F59E0B;")
-
-        def worker():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                client = PostExClient(token=token_str)
-                ok, msg = loop.run_until_complete(client.test_connection(token=token_str))
-                loop.close()
-                self.postex_test_signal.emit(ok, msg)
-            except Exception as e:
-                loop.close()
-                self.postex_test_signal.emit(False, str(e))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _on_postex_test_result(self, ok: bool, msg: str):
-        self.btn_test_postex.setEnabled(True)
-        self.btn_test_postex.setText("🔌 Test Connection")
-
-        if ok:
-            self.lbl_postex_status.setText(f"● {msg}")
-            self.lbl_postex_status.setStyleSheet("color: #22C55E; font-weight: 700;")
-            QMessageBox.information(self, "PostEx API Connected", f"✅ {msg}")
-        else:
-            self.lbl_postex_status.setText(f"● {msg}")
-            self.lbl_postex_status.setStyleSheet("color: #EF4444; font-weight: 700;")
-            QMessageBox.warning(self, "PostEx Connection Failed", f"❌ {msg}")
 
     def _launch_waha_action(self):
         url_str = self.txt_waha_url.text().strip() or "http://localhost:3000"

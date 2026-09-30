@@ -44,20 +44,22 @@ class RuleRegistryWidget(QGroupBox):
         layout.addLayout(top_bar)
 
         # Table Grid
-        self.table = QTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels(["STATUS", "ID", "RULE NAME", "OPERATOR", "KEYWORD MATCH", "ATTACHMENTS", "ACTIONS"])
+        self.table = QTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels(["STATUS", "ID", "RULE NAME", "TARGET ACCOUNT", "OPERATOR", "KEYWORD MATCH", "ATTACHMENTS", "ACTIONS"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self.table.setColumnWidth(0, 76)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(1, 56)
+        self.table.setColumnWidth(1, 52)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(3, 105)
-        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(5, 110)
+        self.table.setColumnWidth(3, 145)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(4, 95)
+        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(6, 88)
+        self.table.setColumnWidth(6, 100)
+        self.table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(7, 88)
         
         # Row height generous enough for the edit button without any clipping
         self.table.verticalHeader().setDefaultSectionSize(44)
@@ -77,7 +79,11 @@ class RuleRegistryWidget(QGroupBox):
         else:
             self.filtered_rules = [
                 r for r in self.rules
-                if search_term in r.get("rule_name", "").lower() or search_term in r.get("keyword_payload", "").lower()
+                if (
+                    search_term in r.get("rule_name", "").lower()
+                    or search_term in r.get("keyword_payload", "").lower()
+                    or search_term in str(r.get("account_target", "")).lower()
+                )
             ]
 
         self.table.blockSignals(True)
@@ -116,12 +122,24 @@ class RuleRegistryWidget(QGroupBox):
             item_name = QTableWidgetItem(r["rule_name"])
             self.table.setItem(row, 2, item_name)
 
+            # Target Account Column
+            target = r.get("account_target", "ALL") or "ALL"
+            if not target or target.upper() == "ALL":
+                item_target = QTableWidgetItem("🌐 All Accounts")
+                item_target.setForeground(Qt.GlobalColor.lightGray)
+            else:
+                alias = target.replace("account_", "").upper() if target.startswith("account_") else target
+                item_target = QTableWidgetItem(f"📱 {alias}")
+                item_target.setForeground(Qt.GlobalColor.cyan)
+            item_target.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(row, 3, item_target)
+
             item_op = QTableWidgetItem(r["matching_operator"])
             item_op.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(row, 3, item_op)
+            self.table.setItem(row, 4, item_op)
 
             item_kw = QTableWidgetItem(r["keyword_payload"])
-            self.table.setItem(row, 4, item_kw)
+            self.table.setItem(row, 5, item_kw)
             
             att_count = len(r.get("attachments", []))
             att_str = f"📎 {att_count} Bound" if att_count > 0 else "0 Files"
@@ -129,7 +147,7 @@ class RuleRegistryWidget(QGroupBox):
             item_att.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             if att_count > 0:
                 item_att.setForeground(Qt.GlobalColor.cyan)
-            self.table.setItem(row, 5, item_att)
+            self.table.setItem(row, 6, item_att)
 
             # Explicit Edit Button — centered inside container with fixed height
             btn_edit = QPushButton("✏️ Edit")
@@ -166,7 +184,7 @@ class RuleRegistryWidget(QGroupBox):
             bl.setSpacing(0)
             bl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             bl.addWidget(btn_edit)
-            self.table.setCellWidget(row, 6, btn_container)
+            self.table.setCellWidget(row, 7, btn_container)
 
         self.table.blockSignals(False)
 

@@ -25,6 +25,7 @@ process.on('unhandledRejection', (reason) => {
 
 // Map of sessionName -> sessionObj: { name, status, qr, phone, client, error }
 const sessionsMap = new Map();
+const lidToPhoneCache = new Map();
 
 async function sendWebhookPayload(eventData) {
   try {
@@ -64,6 +65,79 @@ function formatChatId(target) {
   const clean = target.replace(/[^0-9]/g, '');
   if (!clean) return null;
   return `${clean}@c.us`;
+}
+
+/**
+ * Resolves a WhatsApp LID JID (e.g. 264678030753912@lid) to its real phone number digits (e.g. 92313...).
+ * Uses 3-tier resolution:
+ * 1. In-memory cache (validated so it's not the LID digits themselves)
+ * 2. whatsapp-web.js getContactLidAndPhone
+ * 3. WhatsApp Web internal WidFactory & WAWebApiContact / enforceLidAndPnRetrieval via page evaluate
+ */
+async function resolveLidToPhone(sessionClient, lidJid) {
+  if (!lidJid || !String(lidJid).endsWith('@lid')) return null;
+
+  const cleanLid = String(lidJid).trim();
+  const lidDigits = cleanLid.split('@')[0].replace(/[^0-9]/g, '');
+
+  // Tier 1: Check in-memory cache
+  if (lidToPhoneCache.has(cleanLid)) {
+    const cached = lidToPhoneCache.get(cleanLid);
+    if (cached && cached !== lidDigits) {
+      return cached;
+    }
+  }
+
+  // Tier 2: Query whatsapp-web.js getContactLidAndPhone
+  if (sessionClient && typeof sessionClient.getContactLidAndPhone === 'function') {
+    try {
+      const res = await sessionClient.getContactLidAndPhone([cleanLid]);
+      if (res && res[0] && res[0].pn) {
+        const pnDigits = res[0].pn.split('@')[0].replace(/[^0-9]/g, '');
+        if (pnDigits && pnDigits !== lidDigits) {
+          lidToPhoneCache.set(cleanLid, pnDigits);
+          return pnDigits;
+        }
+      }
+    } catch (e) {}
+  }
+
+  // Tier 3: Direct WhatsApp Web page evaluate fallback
+  if (sessionClient && sessionClient.pupPage) {
+    try {
+      const pnDigits = await sessionClient.pupPage.evaluate(async (targetLid) => {
+        try {
+          const WidFactory = window.require ? window.require('WAWebWidFactory') : null;
+          const ApiContact = window.require ? window.require('WAWebApiContact') : null;
+          if (WidFactory && ApiContact) {
+            const wid = WidFactory.createWid(targetLid);
+            const pn = ApiContact.getPhoneNumber(wid);
+            if (pn) {
+              const str = pn._serialized || pn.user || String(pn);
+              const digits = str.split('@')[0].replace(/[^0-9]/g, '');
+              if (digits) return digits;
+            }
+          }
+          if (window.WWebJS && typeof window.WWebJS.enforceLidAndPnRetrieval === 'function') {
+            const pair = await window.WWebJS.enforceLidAndPnRetrieval(targetLid);
+            if (pair && pair.phone) {
+              const str = pair.phone._serialized || pair.phone.user || String(pair.phone);
+              const digits = str.split('@')[0].replace(/[^0-9]/g, '');
+              if (digits) return digits;
+            }
+          }
+        } catch (e) {}
+        return null;
+      }, cleanLid);
+
+      if (pnDigits && pnDigits !== lidDigits) {
+        lidToPhoneCache.set(cleanLid, pnDigits);
+        return pnDigits;
+      }
+    } catch (e) {}
+  }
+
+  return null;
 }
 
 const sessionStartingLocks = new Map();
@@ -143,8 +217,12 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
         clientId: sessionName,
         dataPath: sessionsDir
       }),
-      takeoverOnConflict: true,
-      takeoverTimeoutMs: 1000,
+      takeoverOnConflict: false,
+      takeoverTimeoutMs: 0,
+      webVersionCache: {
+        type: 'local',
+        path: path.join(__dirname, '.wwebjs_cache')
+      },
       puppeteer: {
         headless: false,
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
@@ -164,9 +242,8 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
           '--disable-session-crashed-bubble',
           '--hide-crash-restore-bubble',
           '--no-default-browser-check',
-          '--js-flags=--max-old-space-size=384',
+          '--js-flags=--max-old-space-size=512',
           '--disable-extensions',
-          '--disable-background-networking',
           '--disable-sync',
           '--disable-default-apps',
           '--disable-translate',
@@ -485,17 +562,35 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
           });
         } else {
           // Inbound customer message (saved contacts, @lid, @c.us, active chats)
-          const senderPhone = fromJid.split('@')[0];
-          let pushName = senderPhone;
-          try {
-            const contact = await msg.getContact();
-            if (contact && (contact.pushname || contact.name || contact.verifiedName)) {
-              pushName = contact.pushname || contact.name || contact.verifiedName;
-            }
-          } catch (e) {}
+          const senderIdOnly = fromJid.split('@')[0];
+          let pushName = senderIdOnly;
+          let realPhoneNumber = null;
 
+          if (fromJid.endsWith('@lid')) {
+            realPhoneNumber = await resolveLidToPhone(sessionObj.client, fromJid);
+            try {
+              const contact = await msg.getContact();
+              if (contact && (contact.pushname || contact.name || contact.verifiedName)) {
+                pushName = contact.pushname || contact.name || contact.verifiedName;
+              }
+            } catch (e) {}
+          } else {
+            try {
+              const contact = await msg.getContact();
+              if (contact) {
+                if (contact.pushname || contact.name || contact.verifiedName) {
+                  pushName = contact.pushname || contact.name || contact.verifiedName;
+                }
+                if (contact.id && contact.id.server === 'c.us') {
+                  realPhoneNumber = contact.number || contact.id.user;
+                }
+              }
+            } catch (e) {}
+          }
+
+          const senderPhone = realPhoneNumber || senderIdOnly;
           const displayBody = body || (isVoice ? '🎤 [Voice Note]' : '');
-          console.log(`📩 [${sessionName}] Inbound message from ${pushName} (${fromJid}): "${displayBody.slice(0, 80)}" (isVoice: ${isVoice})`);
+          console.log(`📩 [${sessionName}] Inbound message from ${pushName} (${fromJid}${realPhoneNumber ? ` -> ${realPhoneNumber}` : ''}): "${displayBody.slice(0, 80)}" (isVoice: ${isVoice})`);
           sendWebhookPayload({
             event: 'message',
             session: sessionName,
@@ -505,6 +600,8 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
               from: fromJid,
               chatId: fromJid,
               phone: senderPhone,
+              realPhone: realPhoneNumber,
+              lid: fromJid.endsWith('@lid') ? fromJid : null,
               name: pushName,
               body: displayBody,
               fromMe: false,
@@ -773,7 +870,7 @@ app.post('/api/sendFile', async (req, res) => {
   try {
     const { chatId, phone, caption, file_path, filePath, file, filename, session } = req.body;
     const sessionName = session || 'default';
-    const targetJid = formatChatId(chatId || phone);
+    let targetJid = formatChatId(chatId || phone);
     const targetPath = file_path || filePath;
 
     const sessionObj = sessionsMap.get(sessionName);
@@ -783,6 +880,26 @@ app.post('/api/sendFile', async (req, res) => {
 
     if (!sessionObj || sessionObj.status !== 'WORKING' || !sessionObj.client) {
       return res.status(503).json({ error: `WhatsApp session [${sessionName}] not connected` });
+    }
+
+    // RESOLVE @lid FOR MEDIA ATTACHMENTS:
+    // WhatsApp Web's internal media send pipeline crashes with memoize getter error
+    // when targetJid is an @lid because WAWebCollections.Contact only indexes @c.us Wid contacts.
+    if (targetJid.endsWith('@lid')) {
+      let resolvedPhone = null;
+      if (phone) {
+        const cleanPhone = String(phone).split('@')[0].replace(/[^0-9]/g, '');
+        if (cleanPhone && !targetJid.includes(cleanPhone)) {
+          resolvedPhone = cleanPhone;
+        }
+      }
+      if (!resolvedPhone) {
+        resolvedPhone = await resolveLidToPhone(sessionObj.client, targetJid);
+      }
+      if (resolvedPhone) {
+        console.log(`🔄 [${sessionName}] Resolved LID ${targetJid} -> ${resolvedPhone}@c.us for media dispatch`);
+        targetJid = `${resolvedPhone}@c.us`;
+      }
     }
 
     let media = null;
@@ -796,7 +913,27 @@ app.post('/api/sendFile', async (req, res) => {
     }
 
     if (media) {
-      const sent = await sessionObj.client.sendMessage(targetJid, media, { caption: caption || '' });
+      let sent;
+      try {
+        sent = await sessionObj.client.sendMessage(targetJid, media, { caption: caption || '' });
+      } catch (sendErr) {
+        // Defensive Fallback: If media send threw memoize/LID error, attempt emergency LID-to-phone conversion and retry
+        const errStr = String(sendErr?.message || sendErr || '');
+        if (targetJid.endsWith('@lid') || errStr.includes('getter') || errStr.includes('memoize')) {
+          console.warn(`⚠️ [${sessionName}] Retrying media dispatch with resolved @c.us due to: ${errStr}`);
+          const emergencyPhone = await resolveLidToPhone(sessionObj.client, chatId || targetJid);
+          if (emergencyPhone) {
+            const fallbackJid = `${emergencyPhone}@c.us`;
+            sent = await sessionObj.client.sendMessage(fallbackJid, media, { caption: caption || '' });
+            targetJid = fallbackJid;
+          } else {
+            throw sendErr;
+          }
+        } else {
+          throw sendErr;
+        }
+      }
+
       const sentId = (sent && sent.id && sent.id._serialized) ? sent.id._serialized : ((sent && sent.id && sent.id.id) ? sent.id.id : 'OK');
       console.log(`📎 [${sessionName}] Media attachment dispatched to ${targetJid}`);
       return res.json({ status: 'SUCCESS', id: sentId });
@@ -810,10 +947,11 @@ app.post('/api/sendFile', async (req, res) => {
 
     res.status(400).json({ error: 'File path or data not found' });
   } catch (err) {
-    console.error('❌ Error sending file:', err.message);
-    res.status(500).json({ error: err.message });
+    console.error('❌ Error sending file:', err.message, err.stack);
+    res.status(500).json({ error: err.message, stack: err.stack });
   }
 });
+
 
 // =========================================================================
 // ON-DEMAND UNREAD CHATS CATCH-UP ENDPOINT

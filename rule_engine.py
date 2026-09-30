@@ -54,13 +54,35 @@ def evaluate_rule_match(inbound_message: str, operator: str, keyword_target: str
 
     return False
 
-def match_inbound_message(inbound_body: str, rules: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def match_inbound_message(inbound_body: str, rules: List[Dict[str, Any]], session_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
-    Scans active rules in priority order and returns the first matching rule or None.
+    Scans active rules and returns the best matching rule or None.
+    Supports per-account targeting:
+      1. First evaluates account-specific rules matching the current session_name.
+      2. Then evaluates global rules (account_target == 'ALL' or empty).
+    Rules targeting a different account are strictly ignored.
     """
+    if not inbound_body or not rules:
+        return None
+
+    # Pass 1: Check account-specific rules if session_name is provided
+    if session_name:
+        for rule in rules:
+            if not rule.get('is_enabled', 1):
+                continue
+            target = rule.get('account_target', 'ALL')
+            if target and target.upper() != 'ALL' and target == session_name:
+                if evaluate_rule_match(inbound_body, rule['matching_operator'], rule['keyword_payload']):
+                    return rule
+
+    # Pass 2: Check global rules (applicable to all accounts)
     for rule in rules:
         if not rule.get('is_enabled', 1):
             continue
-        if evaluate_rule_match(inbound_body, rule['matching_operator'], rule['keyword_payload']):
-            return rule
+        target = rule.get('account_target', 'ALL')
+        if not target or target.upper() == 'ALL':
+            if evaluate_rule_match(inbound_body, rule['matching_operator'], rule['keyword_payload']):
+                return rule
+
     return None
+

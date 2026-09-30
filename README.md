@@ -1,157 +1,133 @@
-# CyberSolu Auto — Enterprise WhatsApp Automation & Support Studio
-
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
-[![Node.js 18+](https://img.shields.io/badge/Node.js-18%2B-green.svg)](https://nodejs.org/)
-[![Engine](https://img.shields.io/badge/Gateway-Baileys%20WebSocket-orange.svg)](https://github.com/WhiskeySockets/Baileys)
-[![UI Framework](https://img.shields.io/badge/UI-PyQt6-darkblue.svg)](https://pypi.org/project/PyQt6/)
-[![Database](https://img.shields.io/badge/Database-SQLite%20WAL-purple.svg)](https://www.sqlite.org/)
-[![License](https://img.shields.io/badge/License-MIT-brightgreen.svg)](LICENSE)
-
-**CyberSolu Auto** is a production-grade, multi-account WhatsApp automation studio designed for e-commerce brands, customer support teams, and digital marketing agencies. Powered by a direct Baileys WebSocket protocol gateway and a PyQt6 desktop control console, CyberSolu Auto captures 100% of TikTok & Meta ad starter leads, routes multi-account incoming chats, and executes intelligent automated rule dispatches without DOM-scraping fragility.
-
----
-
-## 📸 Screenshots & Interface Showcase
-
-> **Note for Repository Maintainers:** To display your application screenshots on GitHub, save your exported PNG images into the `assets/screenshots/` directory using the filenames below.
+# CyberSolu Auto — Multi-Account WhatsApp Automation & AI CRM Suite
 
 <p align="center">
-  <img src="assets/screenshots/dashboard.png" alt="CyberSolu Auto Dashboard Overview" width="100%"/>
-  <br/>
-  <i>Figure 1: CyberSolu Auto Dashboard featuring real-time account status, queue metrics, and 12-hour AM/PM inbound activity logs.</i>
+  <b>Enterprise-Grade Multi-Account WhatsApp Business CRM, AI Voice Note Transcriber, Rule Studio, Catch-Up Studio, and Automated Contact Saver.</b>
 </p>
 
-<br/>
-
 <p align="center">
-  <img src="assets/screenshots/accounts_matrix.png" alt="Multi-Account WhatsApp Session Matrix" width="49%"/>
-  <img src="assets/screenshots/rule_studio.png" alt="Automated Rule Studio & Attachment Manager" width="49%"/>
-  <br/>
-  <i>Figure 2: Multi-Account WhatsApp Matrix (Left) & Rule Studio with document attachment manager (Right).</i>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.10+"/></a>
+  <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-18%2B-339933?style=flat-square&logo=node.js&logoColor=white" alt="Node.js 18+"/></a>
+  <a href="https://pypi.org/project/PyQt6/"><img src="https://img.shields.io/badge/UI-PyQt6%20Desktop-41CD52?style=flat-square&logo=qt&logoColor=white" alt="PyQt6"/></a>
+  <a href="https://deepmind.google/technologies/gemini/"><img src="https://img.shields.io/badge/AI%20Engine-Gemini%202.5%20%2F%20Gemma-8E75B2?style=flat-square&logo=google&logoColor=white" alt="Gemini AI"/></a>
+  <a href="https://www.sqlite.org/"><img src="https://img.shields.io/badge/Database-SQLite%20WAL-003B57?style=flat-square&logo=sqlite&logoColor=white" alt="SQLite"/></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat-square" alt="License"/></a>
 </p>
 
 ---
 
-## ✨ Key Enterprise Features
+## 📌 What is CyberSolu Auto?
 
-* **📱 Native Multi-Account Gateway:** Connect and manage unlimited WhatsApp numbers (`Primary Account`, `Sales Line`, `Support Line 2`) in parallel. Each session operates in complete cryptographic isolation.
-* **⚡ 100% Ad Lead Capture:** Connects directly via WebSocket protocol. Captures TikTok, Facebook, and Instagram click-to-WhatsApp pre-filled ad messages (including product links & catalog parameters) instantly.
-* **🛡️ Send-Rate Governor (Anti-Ban Engine):** Configurable minimum delay (`send_min_delay_seconds`), randomized human jitter (`send_jitter_seconds`), and daily send limits (`send_daily_cap`) to safeguard account health.
-* **📎 Automated Media & Document Dispatch:** Link PDFs, catalog images, videos, and price sheets to trigger keywords. Media is sent cleanly without extra text wrappers.
-* **🤖 AI Fallback Integration:** Seamlessly delegates unmatched customer inquiries to Google Gemini AI with customized system prompts and brand context.
-* **📦 Durable SQLite-WAL Queue:** High-concurrency Write-Ahead Logging database queue ensures zero message loss even during network disconnections or system reboots.
-* **🚫 Group Filter Control:** Toggle individual or global filters to ignore group messages (`@g.us`) and automate 1-on-1 customer support chats exclusively.
+**CyberSolu Auto** is a standalone, local-first **WhatsApp Automation and Customer Support CRM** designed for e-commerce stores, digital agencies, and high-volume customer support operations. 
+
+Built with **PyQt6 (Python)** on the front end and an embedded **Puppeteer / WhatsApp Web Engine** on the back end, it provides multi-account orchestration, zero-delay inbound lead capture, automated Roman Urdu & Urdu voice note comprehension, customer contact numbering, and dedicated unread message recovery.
 
 ---
 
-## 🏗️ System Architecture
+## ⚡ Core Features & Capabilities
+
+### 📱 1. Multi-Account WhatsApp Orchestration
+* Run and monitor multiple WhatsApp numbers simultaneously in isolated browser sessions.
+* Real-time connection status monitoring (`WORKING`, `SCAN_QR_CODE`, `STARTING`, `STOPPED`).
+* Zero session loss with automated cryptographic token backups.
+
+### 🎙️ 2. Multimodal AI Voice Note & Text Assistant (Gemini 2.5)
+* Automatically downloads incoming WhatsApp voice notes (`.ogg` / `.opus`) and transcribes/understands Pakistani Urdu, Roman Urdu, and English accents.
+* Multi-Tier AI fallback model hierarchy: **Gemini 2.5 Flash** $\rightarrow$ **Gemini 2.5 Flash Lite** $\rightarrow$ **Gemma 4** $\rightarrow$ **Failsafe Safe Mode**.
+* Generates contextual, human-like replies answering product pricing, policies, and availability.
+
+### 📥 3. Dedicated Catch-Up Studio (Unread Queue Manager)
+* Extract and review unread customer messages accumulated during offline periods or overnight.
+* Filter by connected account or time windows (6h, 12h, 24h, 48h, or No Limit).
+* Complete exclusion of archived chats to protect historical order records.
+* One-click bulk reply execution at safe, rapid 0.5s speed.
+
+### 🏷️ 4. Automated Contact Saver & Sequential Order ID Numbering
+* Reads customer chats from specific WhatsApp labels.
+* Numbers contacts sequentially starting from custom order numbers (e.g. `#2250`, `#2251`).
+* Updates the WhatsApp address book directly inside WhatsApp Web.
+
+### 🛡️ 5. Anti-Ban Safety Governor & Human Takeover
+* **Send-Rate Governor**: Configurable dispatch speed (0.5s default), randomized human jitter, and daily caps.
+* **Human VA Manual Takeover Mode**: Pauses automated bot dispatches when a human representative types in the browser.
+* **Per-Customer Cooldown**: Prevents repeat auto-reply spam within configurable time windows.
+
+---
+
+## 🏗️ Technical Architecture
 
 ```mermaid
 graph TD
-    A["WhatsApp Server (Meta)"] <-->|"WebSocket Protocol"| B["Node.js Baileys Gateway Engine"]
-    B -->|"HTTP Webhook (JSON)"| C["FastAPI Webhook Server"]
-    C -->|"SQLite-WAL Enqueue"| D[("nexus_automata.db Queue")]
-    D -->|"Durable Consumer Loop"| E["Durable Queue Processor"]
-    E -->|"Rule Match & Rate Limit"| F{"Static Rule or AI?"}
-    F -->|"Rule Matched"| G["WAHA Client Dispatcher"]
-    F -->|"Fallback"| H["Google Gemini AI Engine"]
-    H --> G
-    G -->|"POST /api/sendText & /api/sendFile"| B
-    I["PyQt6 Desktop Control Console"] <-->|"IPC & SQLite State"| D
+    A["Inbound Customer Message (Text or Voice)"] --> B["WhatsApp Web Puppeteer Gateway (Port 3001)"]
+    B -->|"HTTP Webhook"| C["FastAPI Ingestion Server (Port 8000)"]
+    C -->|"SQLite Write-Ahead Logging"| D[("Durable Queue (nexus_automata.db)")]
+    D --> E["Durable Queue Processor"]
+    
+    E --> F{"Human Takeover or Cooldown Active?"}
+    F -->|"YES"| G["Skip Message Cleanly"]
+    F -->|"NO"| H{"Static Rule Match?"}
+    
+    H -->|"Match Found"| M["Send-Rate Governor (0.5s)"]
+    H -->|"No Match"| K{"AI Master Switch ON?"}
+    
+    K -->|"YES"| L["Google Gemini 2.5 Multimodal Engine"]
+    L --> M
+    K -->|"NO"| G
+    
+    M -->|"POST /api/sendText"| B
+    B --> N["Customer Receives Instant WhatsApp Reply"]
 ```
 
 ---
 
-## 🚀 Quick Start & Installation
+## 🚀 Quick Start Guide
 
 ### Prerequisites
 * **Python**: 3.10 or higher
-* **Node.js**: 18.x or higher (with `npm`)
-* **OS**: Windows 10/11, macOS, or Linux
+* **Node.js**: 18.x or higher
+* **OS**: Windows 10 / Windows 11 (or Linux/macOS)
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/YOUR-USERNAME/CyberSolu-WhatsApp-Auto.git
-cd CyberSolu-WhatsApp-Auto
+git clone https://github.com/Daniyal-Rashid-00/whatsapp-automation-multi-account.git
+cd whatsapp-automation-multi-account
 ```
 
-### 2. Set Up Python Virtual Environment
-```bash
-# Windows (PowerShell)
+### 2. Set Up Python Environment
+```powershell
 python -m venv venv
 .\venv\Scripts\Activate.ps1
-
-# Linux / macOS
-python3 -m venv venv
-source venv/bin/activate
-```
-
-### 3. Install Dependencies
-```bash
-# Install Python packages
 pip install -r requirements.txt
-
-# Install Node.js Gateway dependencies
-cd wa_engine
-npm install
-cd ..
 ```
 
-### 4. Launch Application
-```bash
+### 3. Launch CyberSolu Auto
+```powershell
 python main.py
 ```
+The embedded gateway will start automatically, and the PyQt6 control console will launch on your screen.
 
 ---
 
-## 📁 Repository Structure
+## ⚙️ Configuration & Settings
 
-```text
-CyberSolu-WhatsApp-Auto/
-├── assets/
-│   └── screenshots/         # Place your GitHub README screenshots here
-├── wa_engine/
-│   ├── server.js            # Node.js Baileys Multi-Account Gateway Server
-│   ├── package.json         # Baileys & Express dependencies
-│   └── sessions/            # Isolated E2EE session auth stores
-├── ui/
-│   ├── pages/               # PyQt6 Page Views (Dashboard, Accounts, Rules, Settings)
-│   ├── widgets/             # Custom UI Widgets (Toggle Switches, Cards, Modals)
-│   └── theme.py             # Enterprise Corporate Dark Theme QSS
-├── database.py              # SQLite-WAL Schema & DAO
-├── queue_processor.py       # Background Queue Consumer & Dispatcher
-├── rate_governor.py         # Send-Rate Governor & Anti-Ban Delay Logic
-├── webhook_server.py        # FastAPI Inbound Webhook Listener
-├── waha_client.py           # Outbound HTTP Client
-├── waha_launcher.py         # Subprocess Gateway Process Manager
-├── main.py                  # Desktop Application Entry Point
-├── README.md                # Project Documentation
-└── requirements.txt         # Python Dependencies
-```
+| Parameter | Default | Description |
+| :--- | :--- | :--- |
+| `waha_url` | `http://localhost:3001` | WhatsApp Web Gateway endpoint |
+| `send_min_delay_seconds` | `0.5` | Minimum human-like reply delay |
+| `cooldown_minutes` | `10` | Time window to suppress duplicate auto-replies |
+| `human_takeover_minutes` | `5` | Duration bot pauses after human VA manual reply |
+| `ignore_groups` | `1` | Disables automated replies in group chats |
 
 ---
 
-## 🖼️ How to Add Screenshots to Your Repository
+## 🔍 Frequently Asked Questions (FAQ)
 
-1. Create a folder named `assets/screenshots` in your project folder.
-2. Save your application screenshots inside `assets/screenshots/` with these exact names:
-   * `dashboard.png` (Main Dashboard view)
-   * `accounts_matrix.png` (Accounts Management view)
-   * `rule_studio.png` (Rule Creation & Media Attachment view)
-   * `settings.png` (Settings & Safety view)
-3. Push your repository to GitHub. The images will automatically display inside this `README.md`!
+### Can CyberSolu Auto understand Urdu Voice Notes?
+Yes. Voice notes are downloaded in base64 format and passed to Gemini 2.5 Flash multimodal models for transcription and intent recognition, responding naturally in text.
+
+### Are archived chats affected?
+No. CyberSolu Auto strictly excludes archived chats from both live automation and Catch-Up Studio scans.
 
 ---
 
-## 🛡️ Compliance & Safety Notice
-
-WhatsApp enforces automated detection algorithms. To maintain long-term account health:
-* Always use **customer-initiated messaging** (e.g. TikTok / Meta click-to-WhatsApp ads).
-* Keep **Send-Rate Governor delay rules active** (`send_min_delay_seconds: 2.5s`, `send_jitter_seconds: 1.5s`).
-* Gradually ramp message volume over 1–2 weeks for newly registered phone numbers.
-
----
-
-## 📜 License
-
-Distributed under the **MIT License**. See `LICENSE` for more information.
+## 📄 License
+Distributed under the MIT License. See `LICENSE` for more information.

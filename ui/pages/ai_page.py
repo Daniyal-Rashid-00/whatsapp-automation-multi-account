@@ -82,7 +82,7 @@ class AIPage(QWidget):
         is_ai_on = get_setting("ai_master_enabled", get_setting("ai_fallback_enabled", "0")) == "1"
         self.tog_ai_master = ToggleSwitch(checked=is_ai_on)
         self.tog_ai_master.stateChanged.connect(self._on_ai_master_toggled)
-        row_master.addWidget(self.tog_ai_master)
+        row_master.addWidget(self.tog_ai_master, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         v_m_title = QVBoxLayout()
         v_m_title.setSpacing(2)
@@ -106,7 +106,7 @@ class AIPage(QWidget):
         is_voice_on = get_setting("ai_voice_enabled", "1") == "1"
         self.tog_voice = ToggleSwitch(checked=is_voice_on)
         self.tog_voice.stateChanged.connect(self._on_voice_toggled)
-        row_voice.addWidget(self.tog_voice)
+        row_voice.addWidget(self.tog_voice, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         v_v_title = QVBoxLayout()
         v_v_title.setSpacing(2)
@@ -122,6 +122,30 @@ class AIPage(QWidget):
         row_voice.addStretch()
 
         card_layout.addLayout(row_voice)
+
+        # 1c. Conversation Memory (Context Window) Switch
+        row_context = QHBoxLayout()
+        row_context.setSpacing(14)
+
+        is_ctx_on = get_setting("ai_context_enabled", "1") == "1"
+        self.tog_context = ToggleSwitch(checked=is_ctx_on)
+        self.tog_context.stateChanged.connect(self._on_context_toggled)
+        row_context.addWidget(self.tog_context, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        v_c_title = QVBoxLayout()
+        v_c_title.setSpacing(2)
+        c_status = "ENABLED (ON)" if is_ctx_on else "DISABLED (OFF)"
+        c_color = "#22C55E" if is_ctx_on else "#EF4444"
+        self.lbl_c_title = QLabel(f"Conversation Memory (Context Window): {c_status}")
+        self.lbl_c_title.setStyleSheet(f"font-weight: 700; font-size: 13px; color: {c_color};")
+        v_c_title.addWidget(self.lbl_c_title)
+        lbl_c_sub = QLabel("Remembers the last 3 message exchanges per customer so the AI can understand follow-up questions in context.")
+        lbl_c_sub.setStyleSheet("font-size: 11px; color: #8B949E;")
+        v_c_title.addWidget(lbl_c_sub)
+        row_context.addLayout(v_c_title)
+        row_context.addStretch()
+
+        card_layout.addLayout(row_context)
 
         # Divider
         div_ai = QFrame()
@@ -234,35 +258,35 @@ class AIPage(QWidget):
         self.txt_api_key_1 = QLineEdit()
         self.txt_api_key_1.setEchoMode(QLineEdit.EchoMode.Password)
         self.txt_api_key_1.setPlaceholderText("Gemini Key 1 (AIzaSy...) — Tier 1 Primary")
-        row_k1 = self._build_key_row(self.txt_api_key_1, "nexus_ai_key", "Gemini Key 1")
+        row_k1, self.tog_slot_1 = self._build_key_row(self.txt_api_key_1, "nexus_ai_key", "Gemini Key 1", 1)
         v_key_pool.addLayout(row_k1)
 
         # Key Slot 2 (Gemini Secondary)
         self.txt_api_key_2 = QLineEdit()
         self.txt_api_key_2.setEchoMode(QLineEdit.EchoMode.Password)
         self.txt_api_key_2.setPlaceholderText("Gemini Key 2 (AIzaSy...) — Tier 1 Round-Robin")
-        row_k2 = self._build_key_row(self.txt_api_key_2, "nexus_ai_key_2", "Gemini Key 2")
+        row_k2, self.tog_slot_2 = self._build_key_row(self.txt_api_key_2, "nexus_ai_key_2", "Gemini Key 2", 2)
         v_key_pool.addLayout(row_k2)
 
         # Key Slot 3 (Gemini Tertiary)
         self.txt_api_key_3 = QLineEdit()
         self.txt_api_key_3.setEchoMode(QLineEdit.EchoMode.Password)
         self.txt_api_key_3.setPlaceholderText("Gemini Key 3 (AIzaSy...) — Tier 1 Round-Robin")
-        row_k3 = self._build_key_row(self.txt_api_key_3, "nexus_ai_key_3", "Gemini Key 3")
+        row_k3, self.tog_slot_3 = self._build_key_row(self.txt_api_key_3, "nexus_ai_key_3", "Gemini Key 3", 3)
         v_key_pool.addLayout(row_k3)
 
         # Key Slot 4 (OpenRouter Failover)
         self.txt_api_key_4 = QLineEdit()
         self.txt_api_key_4.setEchoMode(QLineEdit.EchoMode.Password)
         self.txt_api_key_4.setPlaceholderText("OpenRouter Key (sk-or-v1-...) — Tier 2 Failover")
-        row_k4 = self._build_key_row(self.txt_api_key_4, "nexus_openrouter_key", "OpenRouter")
+        row_k4, self.tog_slot_4 = self._build_key_row(self.txt_api_key_4, "nexus_openrouter_key", "OpenRouter", 4)
         v_key_pool.addLayout(row_k4)
 
         # Key Slot 5 (Groq Cloud Voice & Failover)
         self.txt_api_key_5 = QLineEdit()
         self.txt_api_key_5.setEchoMode(QLineEdit.EchoMode.Password)
         self.txt_api_key_5.setPlaceholderText("Groq Key (gsk_...) — Free Whisper V3 Voice & Tier 3 Failover")
-        row_k5 = self._build_key_row(self.txt_api_key_5, "nexus_groq_key", "Groq Cloud")
+        row_k5, self.tog_slot_5 = self._build_key_row(self.txt_api_key_5, "nexus_groq_key", "Groq Cloud", 5)
         v_key_pool.addLayout(row_k5)
 
         self.lbl_test_result = QLabel("")
@@ -311,14 +335,33 @@ class AIPage(QWidget):
 
         self.load_settings()
 
-    def _build_key_row(self, line_edit: QLineEdit, ref_key: str, label_text: str) -> QHBoxLayout:
+    def _build_key_row(self, line_edit: QLineEdit, ref_key: str, label_text: str, slot_num: int):
         row = QHBoxLayout()
         row.setSpacing(8)
 
+        # Slot ON/OFF Toggle Switch
+        is_slot_on = get_setting(f"ai_slot_{slot_num}_enabled", "1") == "1"
+        tog = ToggleSwitch(checked=is_slot_on)
+        tog.setToolTip(f"Turn ON/OFF {label_text} in AI failover rotation")
+
+        def on_slot_toggled(checked: bool, s_num=slot_num, le=line_edit):
+            set_setting(f"ai_slot_{s_num}_enabled", "1" if checked else "0")
+            self._update_pool_status_badge()
+            if not checked:
+                le.setStyleSheet("background-color: #161B22; color: #484F58; border: 1px dashed #30363D;")
+            else:
+                le.setStyleSheet("")
+
+        tog.stateChanged.connect(on_slot_toggled)
+        row.addWidget(tog)
+
         lbl = QLabel(label_text + ":")
-        lbl.setFixedWidth(110)
+        lbl.setFixedWidth(115)
         lbl.setStyleSheet("font-size: 11px; color: #8B949E; font-weight: 600;")
         row.addWidget(lbl)
+
+        if not is_slot_on:
+            line_edit.setStyleSheet("background-color: #161B22; color: #484F58; border: 1px dashed #30363D;")
 
         row.addWidget(line_edit, stretch=4)
 
@@ -336,7 +379,7 @@ class AIPage(QWidget):
         btn_clear.clicked.connect(lambda _, le=line_edit, ref=ref_key: self._clear_single_key(le, ref))
         row.addWidget(btn_clear)
 
-        return row
+        return row, tog
 
     def _save_single_key(self, line_edit: QLineEdit, ref_key: str):
         secret = line_edit.text().strip()
@@ -356,13 +399,20 @@ class AIPage(QWidget):
         QMessageBox.information(self, "Key Cleared", f"Key [{ref_key}] cleared from vault.")
 
     def _update_pool_status_badge(self):
-        active_count = key_pool.get_active_count()
+        active_keys = key_pool.get_configured_keys()
+        enabled_active = [k for k in active_keys if k.get("is_active") and k.get("is_enabled")]
+        active_count = len(enabled_active)
+        total_configured = len([k for k in active_keys if k.get("is_active")])
+
         if active_count >= 2:
-            self.lbl_pool_status.setText(f"🟢 {active_count} of 5 Keys Active (Multi-Tier Auto-Failover Enabled)")
+            self.lbl_pool_status.setText(f"🟢 {active_count} of 5 Slots Active & Enabled (Multi-Tier Auto-Failover Enabled)")
             self.lbl_pool_status.setStyleSheet("font-size: 11px; font-weight: 700; color: #22C55E;")
         elif active_count == 1:
-            self.lbl_pool_status.setText("🟢 1 Key Active (Single Key Mode)")
+            self.lbl_pool_status.setText(f"🟢 1 Slot Enabled ({enabled_active[0]['name']})")
             self.lbl_pool_status.setStyleSheet("font-size: 11px; font-weight: 700; color: #38BDF8;")
+        elif total_configured > 0 and active_count == 0:
+            self.lbl_pool_status.setText("⏸ All Active Keys Manually Paused (AI Inactive)")
+            self.lbl_pool_status.setStyleSheet("font-size: 11px; font-weight: 700; color: #F59E0B;")
         else:
             self.lbl_pool_status.setText("🔴 0 Keys Configured (AI Disabled)")
             self.lbl_pool_status.setStyleSheet("font-size: 11px; font-weight: 700; color: #EF4444;")
@@ -376,6 +426,16 @@ class AIPage(QWidget):
         else:
             self.lbl_v_title.setText("Voice Note AI Auto-Replies: DISABLED (OFF)")
             self.lbl_v_title.setStyleSheet("font-weight: 700; font-size: 13px; color: #EF4444;")
+
+    def _on_context_toggled(self, checked: bool):
+        is_on = "1" if checked else "0"
+        set_setting("ai_context_enabled", is_on)
+        if checked:
+            self.lbl_c_title.setText("Conversation Memory (Context Window): ENABLED (ON)")
+            self.lbl_c_title.setStyleSheet("font-weight: 700; font-size: 13px; color: #22C55E;")
+        else:
+            self.lbl_c_title.setText("Conversation Memory (Context Window): DISABLED (OFF)")
+            self.lbl_c_title.setStyleSheet("font-weight: 700; font-size: 13px; color: #EF4444;")
 
     def _on_ai_master_toggled(self, checked: bool):
         is_master = "1" if checked else "0"
@@ -407,6 +467,15 @@ class AIPage(QWidget):
         v_color = "#22C55E" if voice_on else "#EF4444"
         self.lbl_v_title.setText(f"Voice Note AI Auto-Replies: {v_status}")
         self.lbl_v_title.setStyleSheet(f"font-weight: 700; font-size: 13px; color: {v_color};")
+
+        context_on = get_setting("ai_context_enabled", "1") == "1"
+        self.tog_context.blockSignals(True)
+        self.tog_context.setChecked(context_on)
+        self.tog_context.blockSignals(False)
+        c_status = "ENABLED (ON)" if context_on else "DISABLED (OFF)"
+        c_color = "#22C55E" if context_on else "#EF4444"
+        self.lbl_c_title.setText(f"Conversation Memory (Context Window): {c_status}")
+        self.lbl_c_title.setStyleSheet(f"font-weight: 700; font-size: 13px; color: {c_color};")
 
         op_mode = get_setting("ai_operating_mode", "hybrid")
         self.cmb_operating_mode.blockSignals(True)
@@ -446,6 +515,13 @@ class AIPage(QWidget):
         k5 = retrieve_secret("nexus_groq_key") or ""
         self.txt_api_key_5.setText(k5)
 
+        # Load Slot Toggles (Slots 1-5)
+        for i, tog in enumerate([self.tog_slot_1, self.tog_slot_2, self.tog_slot_3, self.tog_slot_4, self.tog_slot_5], start=1):
+            is_on = get_setting(f"ai_slot_{i}_enabled", "1") == "1"
+            tog.blockSignals(True)
+            tog.setChecked(is_on)
+            tog.blockSignals(False)
+
         self._update_pool_status_badge()
 
     def _test_all_connections_clicked(self):
@@ -454,14 +530,14 @@ class AIPage(QWidget):
         groq_model = self.txt_model_groq.text().strip() or "openai/gpt-oss-20b"
 
         keys_to_test = [
-            ("Slot 1 (Gemini 1)", self.txt_api_key_1.text().strip() or retrieve_secret("nexus_ai_key") or "", gemini_model, "gemini"),
-            ("Slot 2 (Gemini 2)", self.txt_api_key_2.text().strip() or retrieve_secret("nexus_ai_key_2") or "", gemini_model, "gemini"),
-            ("Slot 3 (Gemini 3)", self.txt_api_key_3.text().strip() or retrieve_secret("nexus_ai_key_3") or "", gemini_model, "gemini"),
-            ("Slot 4 (OpenRouter)", self.txt_api_key_4.text().strip() or retrieve_secret("nexus_openrouter_key") or "", or_model, "openrouter"),
-            ("Slot 5 (Groq Cloud)", self.txt_api_key_5.text().strip() or retrieve_secret("nexus_groq_key") or "", groq_model, "groq"),
+            (1, "Slot 1 (Gemini 1)", self.txt_api_key_1.text().strip() or retrieve_secret("nexus_ai_key") or "", gemini_model, "gemini"),
+            (2, "Slot 2 (Gemini 2)", self.txt_api_key_2.text().strip() or retrieve_secret("nexus_ai_key_2") or "", gemini_model, "gemini"),
+            (3, "Slot 3 (Gemini 3)", self.txt_api_key_3.text().strip() or retrieve_secret("nexus_ai_key_3") or "", gemini_model, "gemini"),
+            (4, "Slot 4 (OpenRouter)", self.txt_api_key_4.text().strip() or retrieve_secret("nexus_openrouter_key") or "", or_model, "openrouter"),
+            (5, "Slot 5 (Groq Cloud)", self.txt_api_key_5.text().strip() or retrieve_secret("nexus_groq_key") or "", groq_model, "groq"),
         ]
 
-        active_tests = [t for t in keys_to_test if t[1]]
+        active_tests = [t for t in keys_to_test if t[2]]
         if not active_tests:
             QMessageBox.warning(self, "No Keys Configured", "Please enter at least one API key before testing.")
             return
@@ -474,7 +550,11 @@ class AIPage(QWidget):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             results = []
-            for name, key, model, prov in active_tests:
+            for slot, name, key, model, prov in active_tests:
+                slot_enabled = get_setting(f"ai_slot_{slot}_enabled", "1") == "1"
+                if not slot_enabled:
+                    results.append((name, None, "Disabled / Paused (Switch OFF)", 0.0))
+                    continue
                 ok, msg, lat = loop.run_until_complete(test_ai_connection(key, model, prov))
                 results.append((name, ok, msg, lat))
             loop.close()
@@ -483,7 +563,9 @@ class AIPage(QWidget):
             lines = []
             all_ok = True
             for name, ok, msg, lat in results:
-                if ok:
+                if ok is None:
+                    lines.append(f"⚪ {name}: Disabled / Paused (Switch OFF)")
+                elif ok:
                     lines.append(f"🟢 {name}: OK ({lat:.2f}s)")
                 else:
                     all_ok = False
@@ -494,6 +576,8 @@ class AIPage(QWidget):
                         clean_err = "Rate Limited / Quota (429)"
                     elif "404" in clean_err:
                         clean_err = "Model Not Found (404)"
+                    elif "ReadTimeout" in clean_err:
+                        clean_err = "Timeout (>10s) — Turn Switch OFF to Skip"
                     elif len(clean_err) > 40:
                         clean_err = clean_err[:40] + "..."
                     lines.append(f"🔴 {name}: {clean_err}")

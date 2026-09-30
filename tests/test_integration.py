@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import pytest
 from fastapi.testclient import TestClient
 
@@ -23,7 +24,7 @@ def test_webhook_ingestion_and_dedup():
         "engine": "NOWEB",
         "payload": {
             "id": "integration_msg_001",
-            "timestamp": 1783637700,
+            "timestamp": int(time.time()),
             "type": "message",
             "from": "923009998877@c.us",
             "fromMe": False,

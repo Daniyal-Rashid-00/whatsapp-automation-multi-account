@@ -10,7 +10,9 @@ from database import (
     is_message_duplicate,
     enqueue_inbound_message,
     set_human_takeover,
-    was_recently_replied_by_bot
+    was_recently_replied_by_bot,
+    is_number_excluded,
+    remember_lid_mapping
 )
 
 app = FastAPI(title="NexusAutomata Webhook Gateway")
@@ -122,6 +124,22 @@ async def receive_webhook(request: Request):
         if ignore_groups and (chat_id.endswith("@g.us") or "@g.us" in chat_id):
             logging.info(f"Ignore group filter active: dropped message from group {chat_id}")
             return {"status": "ignored_group"}
+
+        # Ignored Numbers / Do Not Automate Filter (Setting: ignored_numbers_enabled)
+        sender_phone = payload.get("phone") or payload.get("realPhone") or ""
+        real_phone = payload.get("realPhone") or ""
+
+        # Auto-record LID to Phone mapping if available
+        if "@lid" in chat_id and (real_phone or (sender_phone and not sender_phone.startswith(chat_id.split("@")[0]))):
+            remember_lid_mapping(chat_id, real_phone or sender_phone)
+
+        if (
+            is_number_excluded(chat_id, session_name=session) or
+            (sender_phone and is_number_excluded(sender_phone, session_name=session)) or
+            (real_phone and is_number_excluded(real_phone, session_name=session))
+        ):
+            logging.info(f"🛡️ Ignored Numbers filter: Dropped message {message_id} from {chat_id} (phone: {sender_phone}) via [{session}] (Exemption active)")
+            return {"status": "ignored_excluded_number"}
 
         # Ignore empty/undecrypted placeholders awaiting retry decryption (unless it is a voice note)
         if not from_me and not body and not has_media and not is_voice:

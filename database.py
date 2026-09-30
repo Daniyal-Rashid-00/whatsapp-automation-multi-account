@@ -1,7 +1,8 @@
 import sqlite3
 import os
 import json
-from typing import List, Dict, Any, Optional
+import threading
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 
 DB_PATH = "nexus_automata.db"
@@ -52,11 +53,18 @@ def init_db():
         matching_operator TEXT CHECK(matching_operator IN ('=', 'Like', 'Start with', 'End with', 'Contains')) NOT NULL,
         keyword_payload TEXT NOT NULL,
         response_message TEXT NOT NULL,
+        account_target TEXT DEFAULT 'ALL',
         is_enabled INTEGER DEFAULT 1 CHECK(is_enabled IN (0, 1)),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """)
     
+    # Auto-migration: Check if account_target column exists in existing automated_rules table
+    try:
+        cursor.execute("ALTER TABLE automated_rules ADD COLUMN account_target TEXT DEFAULT 'ALL';")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
     # Rule Attachments
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS rule_attachments (
@@ -123,10 +131,46 @@ def init_db():
     );
     """)
 
+    # Excluded Numbers / Do Not Automate Table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS excluded_numbers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        phone_number TEXT NOT NULL,
+        raw_input TEXT NOT NULL,
+        label TEXT DEFAULT '',
+        account_target TEXT DEFAULT 'ALL',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(phone_number, account_target)
+    );
+    """)
+
+    # LID to Phone Mappings (WhatsApp Multi-Device @lid resolution)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS lid_phone_mappings (
+        lid TEXT PRIMARY KEY,
+        phone_number TEXT NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+
+    # AI Conversation History — per-customer context memory (last N turns)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS ai_conversation_history (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id      TEXT    NOT NULL,
+        session_name TEXT    NOT NULL DEFAULT 'default',
+        role         TEXT    NOT NULL CHECK(role IN ('user', 'assistant')),
+        content      TEXT    NOT NULL,
+        created_at   TIMESTAMP DEFAULT (datetime('now', 'localtime'))
+    );
+    """)
+
     # Performance Indices
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_inbound_received ON inbound_queue(received_at DESC);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_inbound_status ON inbound_queue(status);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_send_log_sent ON send_log(sent_at);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_excluded_phone ON excluded_numbers(phone_number);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_history_lookup ON ai_conversation_history(chat_id, session_name, created_at DESC);")
 
     # Seed default system settings
     default_settings = [
@@ -144,6 +188,7 @@ def init_db():
         ('send_jitter_seconds', '1.5'),
         ('send_daily_cap', '800'),
         ('ignore_groups', '1'),
+        ('ignored_numbers_enabled', '1'),
         ('autostart_engine', '1'),
         ('cooldown_enabled', '1'),
         ('cooldown_minutes', '1'),
@@ -151,7 +196,15 @@ def init_db():
         ('human_takeover_minutes', '5'),
         ('ai_master_enabled', '0'),
         ('ai_operating_mode', 'hybrid'),
-        ('ai_voice_enabled', '1')
+        ('ai_voice_enabled', '1'),
+        ('ai_slot_1_enabled', '1'),
+        ('ai_slot_2_enabled', '1'),
+        ('ai_slot_3_enabled', '1'),
+        ('ai_slot_4_enabled', '1'),
+        ('ai_slot_5_enabled', '1'),
+        ('ai_context_enabled', '1'),
+        ('ai_context_max_pairs', '3'),
+        ('ai_context_expiry_hours', '24')
     ]
     
     for key, val in default_settings:
@@ -159,6 +212,9 @@ def init_db():
         
     conn.commit()
     conn.close()
+
+    # Initialize fast in-memory cache for excluded numbers
+    reload_excluded_numbers_cache()
 
     # Fresh session startup: clear all old queue items, send logs, and dedup so app starts clean
     reset_session_queue_on_startup()
@@ -519,18 +575,21 @@ def get_all_rules() -> List[Dict[str, Any]]:
     rules = [dict(row) for row in cursor.fetchall()]
     
     for rule in rules:
+        if not rule.get('account_target'):
+            rule['account_target'] = 'ALL'
         cursor.execute("SELECT * FROM rule_attachments WHERE rule_id = ?;", (rule['id'],))
         rule['attachments'] = [dict(att) for att in cursor.fetchall()]
         
     conn.close()
     return rules
 
-def add_rule(name: str, operator: str, keyword: str, response: str, is_enabled: int = 1, attachments: Optional[List[Dict[str, str]]] = None) -> int:
+def add_rule(name: str, operator: str, keyword: str, response: str, is_enabled: int = 1, attachments: Optional[List[Dict[str, str]]] = None, account_target: str = 'ALL') -> int:
     conn = get_db_connection()
     cursor = conn.cursor()
+    target = account_target if account_target and account_target.strip() else 'ALL'
     cursor.execute(
-        "INSERT INTO automated_rules (rule_name, matching_operator, keyword_payload, response_message, is_enabled) VALUES (?, ?, ?, ?, ?);",
-        (name, operator, keyword, response, is_enabled)
+        "INSERT INTO automated_rules (rule_name, matching_operator, keyword_payload, response_message, is_enabled, account_target) VALUES (?, ?, ?, ?, ?, ?);",
+        (name, operator, keyword, response, is_enabled, target)
     )
     rule_id = cursor.lastrowid
     
@@ -545,12 +604,13 @@ def add_rule(name: str, operator: str, keyword: str, response: str, is_enabled: 
     conn.close()
     return rule_id
 
-def update_rule(rule_id: int, name: str, operator: str, keyword: str, response: str, is_enabled: int, attachments: Optional[List[Dict[str, str]]] = None):
+def update_rule(rule_id: int, name: str, operator: str, keyword: str, response: str, is_enabled: int, attachments: Optional[List[Dict[str, str]]] = None, account_target: str = 'ALL'):
     conn = get_db_connection()
     cursor = conn.cursor()
+    target = account_target if account_target and account_target.strip() else 'ALL'
     cursor.execute(
-        "UPDATE automated_rules SET rule_name = ?, matching_operator = ?, keyword_payload = ?, response_message = ?, is_enabled = ? WHERE id = ?;",
-        (name, operator, keyword, response, is_enabled, rule_id)
+        "UPDATE automated_rules SET rule_name = ?, matching_operator = ?, keyword_payload = ?, response_message = ?, is_enabled = ?, account_target = ? WHERE id = ?;",
+        (name, operator, keyword, response, is_enabled, target, rule_id)
     )
     cursor.execute("DELETE FROM rule_attachments WHERE rule_id = ?;", (rule_id,))
     
@@ -661,3 +721,300 @@ def is_human_takeover_active(chat_id: str) -> bool:
     conn.close()
     return row is not None
 
+
+# --- Feature: Ignored Numbers / Do Not Automate ---
+_excluded_lock = threading.Lock()
+_excluded_cache: Dict[str, set] = {}
+_lid_to_phone_map: Dict[str, str] = {}
+
+def normalize_phone_number(phone: str) -> str:
+    """
+    Normalizes any phone string into clean standard digits for matching.
+    Handles Pakistani numbers (03xx -> 923xx), international format, spaces, dashes, @c.us, @lid.
+    """
+    if not phone:
+        return ""
+    phone_str = str(phone).split("@")[0].strip()
+    digits = "".join(ch for ch in phone_str if ch.isdigit())
+    if digits.startswith("03") and len(digits) == 11:
+        digits = "92" + digits[1:]
+    elif digits.startswith("0") and len(digits) >= 10:
+        digits = "92" + digits[1:]
+    return digits
+
+def remember_lid_mapping(lid: str, phone: str):
+    """
+    Stores an association between a WhatsApp LID (e.g. 68753953931427@lid) and a real phone number (e.g. 923137840038).
+    Updates both in-memory cache and SQLite table.
+    """
+    lid_digits = normalize_phone_number(lid)
+    phone_digits = normalize_phone_number(phone)
+    if not lid_digits or not phone_digits or lid_digits == phone_digits:
+        return
+
+    with _excluded_lock:
+        _lid_to_phone_map[lid_digits] = phone_digits
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO lid_phone_mappings (lid, phone_number) VALUES (?, ?) "
+            "ON CONFLICT(lid) DO UPDATE SET phone_number = excluded.phone_number, updated_at = CURRENT_TIMESTAMP;",
+            (lid_digits, phone_digits)
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def get_phone_for_lid(lid: str) -> Optional[str]:
+    """Retrieves mapped real phone number for a WhatsApp LID JID."""
+    lid_digits = normalize_phone_number(lid)
+    with _excluded_lock:
+        return _lid_to_phone_map.get(lid_digits)
+
+def reload_excluded_numbers_cache():
+    """Reloads the in-memory cache of excluded numbers and LID mappings from DB for O(1) matching."""
+    global _excluded_cache, _lid_to_phone_map
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT phone_number, account_target FROM excluded_numbers;")
+        rows = cursor.fetchall()
+
+        new_cache: Dict[str, set] = {}
+        for r in rows:
+            p = r["phone_number"]
+            tgt = (r["account_target"] or "ALL").strip()
+            if p not in new_cache:
+                new_cache[p] = set()
+            new_cache[p].add(tgt)
+
+        # Load LID to phone mappings
+        new_lid_map: Dict[str, str] = {}
+        try:
+            cursor.execute("SELECT lid, phone_number FROM lid_phone_mappings;")
+            for lr in cursor.fetchall():
+                new_lid_map[lr["lid"]] = lr["phone_number"]
+        except Exception:
+            pass
+
+        conn.close()
+
+        with _excluded_lock:
+            _excluded_cache = new_cache
+            _lid_to_phone_map = new_lid_map
+    except Exception:
+        pass
+
+def add_excluded_number(raw_phone: str, label: str = "", account_target: str = "ALL") -> Tuple[bool, str]:
+    """
+    Adds a phone number to the exclusion list.
+    Normalizes number to clean digits while preserving user's raw input.
+    """
+    cleaned = normalize_phone_number(raw_phone)
+    if not cleaned or len(cleaned) < 7:
+        return False, "Invalid phone number. Please enter a valid number (e.g. 0300 1234567 or +923001234567)."
+
+    target = (account_target or "ALL").strip()
+    raw_clean = str(raw_phone).strip()
+    label_clean = str(label or "").strip()
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "INSERT INTO excluded_numbers (phone_number, raw_input, label, account_target) "
+            "VALUES (?, ?, ?, ?);",
+            (cleaned, raw_clean, label_clean, target)
+        )
+        conn.commit()
+        reload_excluded_numbers_cache()
+        return True, "Number added to exclusion list."
+    except sqlite3.IntegrityError:
+        return False, f"Number '{raw_clean}' is already excluded for target '{target}'."
+    except Exception as e:
+        return False, f"Database error: {str(e)}"
+    finally:
+        conn.close()
+
+def remove_excluded_number(number_id: int) -> bool:
+    """Removes an excluded number by its primary key ID."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM excluded_numbers WHERE id = ?;", (number_id,))
+        conn.commit()
+        reload_excluded_numbers_cache()
+        return cursor.rowcount > 0
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+def get_all_excluded_numbers() -> List[Dict[str, Any]]:
+    """Fetches all excluded numbers ordered newest first."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM excluded_numbers ORDER BY id DESC;")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def is_number_excluded(sender_chat_id: str, session_name: str = "default") -> bool:
+    """
+    Sub-millisecond (0.001 ms) in-memory check to verify if sender is in the exclusion list.
+    Checks direct normalized digits (phone or LID) AND resolves known LID to phone mappings.
+    Returns True if sender is excluded globally ('ALL') or for this specific session_name.
+    """
+    try:
+        if get_setting("ignored_numbers_enabled", "1") != "1":
+            return False
+
+        digits = normalize_phone_number(sender_chat_id)
+        if not digits:
+            return False
+
+        with _excluded_lock:
+            # 1. Direct match on normalized digits (phone or LID)
+            targets = _excluded_cache.get(digits)
+            if targets and ("ALL" in targets or session_name in targets):
+                return True
+
+            # 2. If digits is an LID, check if it maps to an excluded phone number
+            mapped_phone = _lid_to_phone_map.get(digits)
+            if mapped_phone:
+                mapped_targets = _excluded_cache.get(mapped_phone)
+                if mapped_targets and ("ALL" in mapped_targets or session_name in mapped_targets):
+                    return True
+
+        return False
+    except Exception:
+        return False
+
+
+# =============================================================================
+# AI Conversation History — Per-Customer Context Memory
+# =============================================================================
+
+def save_conversation_turn(
+    chat_id: str,
+    session_name: str,
+    role: str,
+    content: str,
+    max_pairs: int = 3
+) -> None:
+    """
+    Saves one message turn (user or assistant) to the per-customer conversation history.
+    Automatically trims the table to keep only the most recent `max_pairs` pairs (default 3).
+    Skips saving if content is empty.
+
+    Args:
+        chat_id:      Customer's WhatsApp JID (e.g. '923001234567@c.us').
+        session_name: Account session name ('account_gc', 'account_hg', etc.).
+        role:         'user' (inbound message) or 'assistant' (bot reply).
+        content:      The message text to store.
+        max_pairs:    Maximum number of user+assistant pairs to keep (default 3 = 6 rows max).
+    """
+    if not content or not content.strip():
+        return
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Insert the new turn
+        cursor.execute(
+            "INSERT INTO ai_conversation_history (chat_id, session_name, role, content) VALUES (?, ?, ?, ?);",
+            (chat_id, session_name, role, content.strip())
+        )
+
+        # Trim to keep only the most recent max_pairs * 2 rows for this chat
+        max_rows = max_pairs * 2
+        cursor.execute(
+            """
+            DELETE FROM ai_conversation_history
+            WHERE chat_id = ? AND session_name = ?
+              AND id NOT IN (
+                  SELECT id FROM ai_conversation_history
+                  WHERE chat_id = ? AND session_name = ?
+                  ORDER BY id DESC
+                  LIMIT ?
+              );
+            """,
+            (chat_id, session_name, chat_id, session_name, max_rows)
+        )
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        import logging
+        logging.warning(f"[conversation_history] Failed to save turn for {chat_id}: {e}")
+
+
+def get_conversation_history(
+    chat_id: str,
+    session_name: str,
+    max_pairs: int = 3,
+    max_age_hours: int = 24
+) -> List[Dict[str, str]]:
+    """
+    Returns the last `max_pairs` user+assistant turn pairs for a given customer,
+    filtered to only include turns within the last `max_age_hours` (default 24h).
+    Returns an empty list if no history exists or all turns have expired.
+
+    The returned list is in chronological order (oldest first), ready to be inserted
+    directly into an AI provider's messages/contents array.
+
+    Returns:
+        List of dicts: [{"role": "user" | "assistant", "content": "..."}]
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT role, content
+            FROM ai_conversation_history
+            WHERE chat_id = ? AND session_name = ?
+              AND created_at >= datetime('now', 'localtime', ? || ' hours')
+            ORDER BY id DESC
+            LIMIT ?;
+            """,
+            (chat_id, session_name, f"-{max_age_hours}", max_pairs * 2)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            return []
+
+        # Reverse so oldest is first (chronological order for API)
+        return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+    except Exception as e:
+        import logging
+        logging.warning(f"[conversation_history] Failed to fetch history for {chat_id}: {e}")
+        return []
+
+
+def clear_conversation_history(chat_id: str, session_name: str) -> None:
+    """
+    Wipes all stored conversation history for a specific customer and session.
+    Useful when human takeover ends and the bot resumes fresh, or for manual resets.
+
+    Args:
+        chat_id:      Customer's WhatsApp JID.
+        session_name: Account session name.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM ai_conversation_history WHERE chat_id = ? AND session_name = ?;",
+            (chat_id, session_name)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        import logging
+        logging.warning(f"[conversation_history] Failed to clear history for {chat_id}: {e}")

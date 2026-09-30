@@ -12,11 +12,14 @@ from database import (
     get_setting,
     is_human_takeover_active,
     is_cooldown_active,
-    record_reply_timestamp
+    record_reply_timestamp,
+    is_number_excluded,
+    get_phone_for_lid,
+    get_conversation_history,
+    save_conversation_turn,
 )
 from rule_engine import match_inbound_message
 from ai_engine import generate_ai_response
-from postex_engine import resolve_postex_tracking
 from rate_governor import check_and_apply_rate_limit
 from waha_client import WAHAClient
 
@@ -154,6 +157,18 @@ class DurableQueueProcessor:
                 update_queue_status(msg_id, "ignored")
                 return
 
+            # Guard: Ignored Numbers / Do Not Automate
+            sender_phone = payload_dict.get('phone') or payload_dict.get('realPhone') or ''
+            real_phone = payload_dict.get('realPhone') or ''
+            if (
+                is_number_excluded(chat_id, session_name=session_name) or
+                (sender_phone and is_number_excluded(sender_phone, session_name=session_name)) or
+                (real_phone and is_number_excluded(real_phone, session_name=session_name))
+            ):
+                logging.info(f"🛡️ Ignored Numbers filter (queue worker): Dropping {msg_id} from {chat_id} (phone: {sender_phone}) via [{session_name}]")
+                update_queue_status(msg_id, "ignored")
+                return
+
             # Check Feature 2: Human VA Takeover (using cached settings)
             takeover_enabled = self._settings_cache.get("human_takeover_enabled", "1") == "1"
             if takeover_enabled and is_human_takeover_active(chat_id):
@@ -173,49 +188,38 @@ class DurableQueueProcessor:
                     update_queue_status(msg_id, "ignored")
                     return
 
-            # 🚚 Option A: PostEx Courier Automated Parcel Tracking Resolution
-            postex_on = self._settings_cache.get("postex_tracking_enabled", "1") == "1"
-            if postex_on:
-                customer_name = payload_dict.get("name") or ""
-                customer_phone = payload_dict.get("phone") or chat_id.split("@")[0]
-                try:
-                    postex_reply = await resolve_postex_tracking(
-                        inbound_body=body,
-                        contact_name=customer_name,
-                        customer_phone=customer_phone
-                    )
-                    if postex_reply and postex_reply.strip():
-                        logging.info(f"🚚 PostEx Automated Tracking Match for message {msg_id} via session [{session_name}]")
-                        allowed, reason = await check_and_apply_rate_limit(chat_id)
-                        if not allowed:
-                            logging.warning(f"Rate governor blocked PostEx tracking dispatch for {msg_id}: {reason}")
-                            update_queue_status(msg_id, "failed")
-                            return
-
-                        sent_ok = await self.waha_client.send_text(chat_id, postex_reply, session=session_name)
-                        if sent_ok:
-                            update_queue_status(msg_id, "done")
-                            record_reply_timestamp(chat_id)
-                            return
-                        else:
-                            logging.error(f"Failed to dispatch PostEx tracking reply for message {msg_id} via session [{session_name}]")
-                            update_queue_status(msg_id, "failed")
-                            return
-                except Exception as e:
-                    logging.warning(f"PostEx tracking check error for message {msg_id}: {e}")
-
             # Check AI Master Switch & Operating Mode
             ai_master_on = self._settings_cache.get("ai_master_enabled", self._settings_cache.get("ai_fallback_enabled", "0")) == "1"
             ai_mode = self._settings_cache.get("ai_operating_mode", "hybrid")
 
+            # Fetch conversation context settings
+            context_enabled = self._settings_cache.get("ai_context_enabled", "1") == "1"
+            try:
+                context_max_pairs = int(self._settings_cache.get("ai_context_max_pairs", "3"))
+                context_expiry_hours = int(self._settings_cache.get("ai_context_expiry_hours", "24"))
+            except (ValueError, TypeError):
+                context_max_pairs = 3
+                context_expiry_hours = 24
+
             if ai_master_on and ai_mode == "ai_only":
                 # Mode 2: Exclusive AI Mode (Rules Bypassed)
                 logging.info(f"Exclusive AI Mode active for {msg_id} via session [{session_name}] (is_voice: {is_voice})")
+
+                # Fetch per-customer conversation history if context is enabled
+                history = []
+                if context_enabled:
+                    try:
+                        history = get_conversation_history(chat_id, session_name, max_pairs=context_max_pairs, max_age_hours=context_expiry_hours)
+                    except Exception as hist_err:
+                        logging.warning(f"[context] Failed to load history for {chat_id}: {hist_err}")
+
                 ai_reply = await generate_ai_response(
                     sender_id=chat_id,
                     inbound_body=body or "[Customer sent a voice note]",
                     audio_base64=audio_base64,
-                    audio_mime_type=audio_mime
+                    audio_mime_type=audio_mime,
+                    session_name=session_name,
+                    conversation_history=history or None
                 )
 
                 if not ai_reply or not ai_reply.strip():
@@ -233,6 +237,13 @@ class DurableQueueProcessor:
                 if sent_ok:
                     update_queue_status(msg_id, "done")
                     record_reply_timestamp(chat_id)
+                    # Save conversation turns for next message's context
+                    if context_enabled and body.strip():
+                        try:
+                            save_conversation_turn(chat_id, session_name, "user", body.strip(), max_pairs=context_max_pairs)
+                            save_conversation_turn(chat_id, session_name, "assistant", ai_reply, max_pairs=context_max_pairs)
+                        except Exception as save_err:
+                            logging.warning(f"[context] Failed to save turns for {chat_id}: {save_err}")
                 else:
                     logging.error(f"Failed to dispatch AI reply for message {msg_id} via session [{session_name}]")
                     update_queue_status(msg_id, "failed")
@@ -243,12 +254,12 @@ class DurableQueueProcessor:
                 matched_rule = None
                 if rules_master_on and not is_voice:
                     rules = get_all_rules()
-                    matched_rule = match_inbound_message(body, rules)
+                    matched_rule = match_inbound_message(body, rules, session_name=session_name)
                 elif not rules_master_on:
                     logging.info(f"Rules Master Switch is OFF. Skipping static rule matching for message {msg_id}.")
 
                 if matched_rule:
-                    logging.info(f"Rule matched for message {msg_id}: Rule '{matched_rule['rule_name']}' via session [{session_name}]")
+                    logging.info(f"Rule matched for message {msg_id}: Rule '{matched_rule['rule_name']}' (Target: {matched_rule.get('account_target', 'ALL')}) via session [{session_name}]")
                     allowed, reason = await check_and_apply_rate_limit(chat_id)
                     if not allowed:
                         logging.warning(f"Rate governor blocked dispatch for {msg_id}: {reason}")
@@ -263,6 +274,17 @@ class DurableQueueProcessor:
 
                     # Dispatch file attachments if linked
                     attachments = matched_rule.get('attachments', [])
+                    resolved_phone = ""
+                    if chat_id.endswith("@lid"):
+                        resolved_phone = get_phone_for_lid(chat_id) or ""
+                        if not resolved_phone and payload_dict:
+                            p = payload_dict.get("payload", {})
+                            rp = p.get("realPhone") or p.get("phone") or ""
+                            clean_rp = "".join(ch for ch in str(rp) if ch.isdigit())
+                            lid_digits = "".join(ch for ch in str(chat_id).split("@")[0] if ch.isdigit())
+                            if clean_rp and clean_rp != lid_digits:
+                                resolved_phone = clean_rp
+
                     for att in attachments:
                         file_ok = await self.waha_client.send_file(
                             chat_id=chat_id,
@@ -270,7 +292,8 @@ class DurableQueueProcessor:
                             mime_type=att['mime_type'],
                             filename=att['file_name'],
                             caption=att.get('media_caption', ''),
-                            session=session_name
+                            session=session_name,
+                            phone=resolved_phone
                         )
                         if not file_ok:
                             send_success = False
@@ -278,6 +301,13 @@ class DurableQueueProcessor:
                     if send_success:
                         update_queue_status(msg_id, "done")
                         record_reply_timestamp(chat_id)
+                        # Save rule reply to history so AI knows what was told to customer
+                        if context_enabled and body.strip() and resp_text:
+                            try:
+                                save_conversation_turn(chat_id, session_name, "user", body.strip(), max_pairs=context_max_pairs)
+                                save_conversation_turn(chat_id, session_name, "assistant", resp_text, max_pairs=context_max_pairs)
+                            except Exception as save_err:
+                                logging.warning(f"[context] Failed to save rule turns for {chat_id}: {save_err}")
                     else:
                         logging.error(f"Failed to dispatch rule response/attachment for message {msg_id} via session [{session_name}]")
                         update_queue_status(msg_id, "failed")
@@ -285,11 +315,22 @@ class DurableQueueProcessor:
                 elif ai_master_on:
                     # Hybrid Mode: No rule matched (or is voice note) -> trigger AI fallback
                     logging.info(f"Hybrid Mode: Triggering AI response for message {msg_id} via session [{session_name}] (is_voice: {is_voice})")
+
+                    # Fetch per-customer conversation history if context is enabled
+                    history = []
+                    if context_enabled:
+                        try:
+                            history = get_conversation_history(chat_id, session_name, max_pairs=context_max_pairs, max_age_hours=context_expiry_hours)
+                        except Exception as hist_err:
+                            logging.warning(f"[context] Failed to load history for {chat_id}: {hist_err}")
+
                     ai_reply = await generate_ai_response(
                         sender_id=chat_id,
                         inbound_body=body or "[Customer sent a voice note]",
                         audio_base64=audio_base64,
-                        audio_mime_type=audio_mime
+                        audio_mime_type=audio_mime,
+                        session_name=session_name,
+                        conversation_history=history or None
                     )
 
                     if not ai_reply or not ai_reply.strip():
@@ -307,12 +348,20 @@ class DurableQueueProcessor:
                     if sent_ok:
                         update_queue_status(msg_id, "done")
                         record_reply_timestamp(chat_id)
+                        # Save conversation turns for next message's context
+                        if context_enabled and body.strip():
+                            try:
+                                save_conversation_turn(chat_id, session_name, "user", body.strip(), max_pairs=context_max_pairs)
+                                save_conversation_turn(chat_id, session_name, "assistant", ai_reply, max_pairs=context_max_pairs)
+                            except Exception as save_err:
+                                logging.warning(f"[context] Failed to save turns for {chat_id}: {save_err}")
                     else:
                         logging.error(f"Failed to dispatch AI fallback reply for message {msg_id} via session [{session_name}]")
                         update_queue_status(msg_id, "failed")
                 else:
                     logging.info(f"⚠️ NO RULE MATCHED for message {msg_id} ('{body[:60]}'). AI Master Switch is OFF.")
                     update_queue_status(msg_id, "ignored")
+
 
         except Exception as msg_err:
             logging.error(f"Error processing message {msg_id}: {msg_err}")
