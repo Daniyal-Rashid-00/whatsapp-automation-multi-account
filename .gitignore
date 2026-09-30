@@ -88,3 +88,4 @@ build/
 uploads/
 temp/
 tmp/
+old_prompt_backup.txt

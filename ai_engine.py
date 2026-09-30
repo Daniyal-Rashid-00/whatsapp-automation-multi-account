@@ -154,6 +154,32 @@ def sanitize_ai_reply(reply: str) -> str:
         "pre-configured answer:" in lower_clean):
         return ""
 
+    # 9. Dangerous commitment blocker (prevent sycophantic false promises on delivery or pricing)
+    lower_for_check = lower_clean
+    is_negated = any(neg in lower_for_check for neg in ("nahi", "not", "possible nahi", "mumkin nahi", "impossible", "kam nahi"))
+
+    if not is_negated:
+        # False commitments to deliver tomorrow or in 1-2 days
+        fast_delivery_commitments = [
+            r'\b(?:kal|tomorrow|1\s*day|2\s*days?|1\s*din|2\s*din)\s*(?:tak)?\s*(?:ho\s*jaye|mil\s*jaye|aa\s*jaye|pahunch|deliver|bhej|confirm)',
+            r'\b(?:haan|ji|yes|ok|theek)\b.*?\b(?:kal|tomorrow)\b',
+            r'\b(?:aaj\s*hi|turant|immediately|right\s*now)\s*(?:bhej|deliver|de\s*deta)',
+            r'\b(?:bilkul|zaroor|pakka)\s*(?:kal|aaj|1\s*din)\b',
+        ]
+        for pat in fast_delivery_commitments:
+            if re.search(pat, lower_for_check):
+                logging.warning(f"[sanity_check] Blocked dangerous false delivery commitment: '{text}'")
+                return ""
+
+        # False commitments to unauthorized discounts
+        discount_commitments = [
+            r'\b(?:discount\s*de\s*deta|kam\s*kar\s*deta|special\s*discount\s*mila|price\s*kam\s*karta)\b',
+        ]
+        for pat in discount_commitments:
+            if re.search(pat, lower_for_check):
+                logging.warning(f"[sanity_check] Blocked unauthorized discount commitment: '{text}'")
+                return ""
+
     return text
 
 
@@ -171,10 +197,11 @@ def build_llm_request(rules_context: str, context_box_text: str, sender_id: str,
         f"{base_system}\n\n"
         "=== OPERATING GUIDELINES ===\n"
         "1. SEMANTIC INTENT MATCHING: Customers will ask questions in Roman Urdu (e.g. 'ha?', 'milega?', 'price kya ha?', 'customize shirt ha?'), Urdu, or English with typos or natural phrasing. If their message refers to any Topic / Product in the list below, provide that product's pre-configured details and price.\n"
-        "2. NATURAL & POLITE: Reply politely in Roman Urdu or English matching the customer's language. Keep replies concise and formatted with WhatsApp bold (*bold*) where helpful.\n"
+        "2. NATURAL & POLITE: Reply politely in Roman Urdu matching the customer's language. Keep replies short (1-2 sentences max). Do NOT use bold (*bold*), italic (_italic_), or emojis. Make replies sound natural like a real human assistant, not a robotic AI.\n"
         "3. ACCURACY & GROUNDING: Use ONLY the information, pricing, and policies from the list below. Do not invent new prices or make up fake products.\n"
-        "4. UNRELATED INQUIRIES & SILENCE: If the customer sends an address, personal name, random chit-chat, or something unrelated to any topic in the list below, respond with ONLY the exact single word: CANNOT_ANSWER. Never output your internal thinking, chain of thought, explanations, or phrases like '(No response)'.\n"
-        "5. CRITICAL — NO REASONING OUTPUT: You MUST output ONLY the final reply to send to the customer. NEVER output your thought process, analysis, guidelines references, rule names, or any meta-commentary. Do not write things like 'The customer says...', 'The guideline says...', 'We could respond with...', 'According to the rules...'. Output ONLY the actual message text.\n\n"
+        "4. UNRELATED INQUIRIES & SILENCE: If the customer sends an address, personal name, random chit-chat, simple acknowledgement ('ok', 'theek hai', 'g', 'thanks'), or something unrelated to any topic in the list below, respond with ONLY the exact single word: CANNOT_ANSWER. Never output your internal thinking, chain of thought, explanations, or phrases like '(No response)'.\n"
+        "5. CRITICAL — NO REASONING OUTPUT: You MUST output ONLY the final reply to send to the customer. NEVER output your thought process, analysis, guidelines references, rule names, or any meta-commentary. Output ONLY the actual message text.\n"
+        "6. HARD POLICY CONSTRAINTS (NEVER OVERRIDE): Delivery time is ALWAYS 3 to 6 days. If customer asks for delivery tomorrow or in 1-2 days, state firmly: 'Delivery 3 se 6 din lagti hai, is se jaldi possible nahi.' Never say yes, ok, or agree to faster delivery or price reductions.\n\n"
         "=== [PRE-CONFIGURED PRODUCTS & ANSWERS] ===\n"
         f"{rules_context}\n\n"
         "=== [ADDITIONAL KNOWLEDGE BASE] ===\n"

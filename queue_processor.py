@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Optional, Dict, Any, List
 
@@ -22,6 +23,66 @@ from rule_engine import match_inbound_message
 from ai_engine import generate_ai_response
 from rate_governor import check_and_apply_rate_limit
 from waha_client import WAHAClient
+
+# =============================================================================
+# Code-Level Pre-Filter Constants & Guard Logic
+# =============================================================================
+
+_ACK_PHRASES = {
+    "ok", "okay", "k", "g", "ji", "hm", "hmm", "ha", "han", "haan",
+    "theek", "theek ha", "theek hai", "thik ha", "thik hai", "thk", "thk ha", "thk hai",
+    "accha", "acha", "achha", "acha ji", "accha ji", "achha ji",
+    "thanks", "thank you", "thx", "shukriya", "shukria", "jazakallah", "jazak allah",
+    "noted", "got it", "seen", "read", "received",
+    "inshallah", "inshaallah", "insha allah", "mashallah", "mashaallah",
+    "welcome", "wc", "np", "no problem", "done",
+    "👍", "✅", "🙏", "👌", "😊", "❤️"
+}
+
+_ADDRESS_KEYWORDS = {
+    "gali", "mohalla", "street", "road", "block", "sector", "phase",
+    "house", "flat", "floor", "near", "opposite", "opp",
+    "colony", "town", "city", "district", "tehsil", "lahore", "karachi",
+    "islamabad", "rawalpindi", "faisalabad", "multan", "gujranwala",
+    "peshawar", "quetta", "sialkot", "gujrat", "postal", "zip",
+    "village", "chak", "teh", "distt", "dakkhana", "post office",
+}
+
+
+def _should_prefilter_message(body: str, is_voice: bool) -> Optional[str]:
+    """
+    Checks if an inbound text message should be filtered out at code-level before reaching AI.
+    Returns a reason string ('acknowledgement' or 'address') if it should be dropped, or None if it should proceed.
+    """
+    if is_voice or not body:
+        return None
+
+    body_clean = body.strip().lower()
+
+    # 1. Pure acknowledgement check (exact or clean punctuation)
+    clean_punc = re.sub(r'[^\w\s]', '', body_clean).strip()
+    if body_clean in _ACK_PHRASES or clean_punc in _ACK_PHRASES:
+        return "pure acknowledgement"
+
+    words = clean_punc.split()
+    if 1 <= len(words) <= 3 and all(w in _ACK_PHRASES for w in words):
+        return f"acknowledgement phrase ('{clean_punc}')"
+
+    # 2. Address / Contact details check
+    has_phone_or_postal = bool(re.search(r'\b\d{7,13}\b', body))
+    body_words_set = set(re.findall(r'[a-zA-Z]+', body_clean))
+    matching_addr_words = body_words_set & _ADDRESS_KEYWORDS
+
+    # Case A: Contains phone/postal digits AND at least one address keyword (e.g. house, street, city)
+    if has_phone_or_postal and len(matching_addr_words) >= 1:
+        return f"address with phone number ({', '.join(matching_addr_words)})"
+
+    # Case B: Contains 2 or more distinct address keywords (e.g. 'house 4 street 2' or 'near bilal masjid gali 3')
+    if len(matching_addr_words) >= 2:
+        return f"address details ({', '.join(matching_addr_words)})"
+
+    return None
+
 
 
 class SettingsCache:
@@ -154,6 +215,13 @@ class DurableQueueProcessor:
             # Guard: Skip media-only or empty messages without text caption (unless voice note)
             if not body.strip() and not is_voice:
                 logging.info(f"📷 Media-only/empty message {msg_id} from {chat_id} ignored cleanly.")
+                update_queue_status(msg_id, "ignored")
+                return
+
+            # Guard: Pre-filter trivial acknowledgements and address submissions (prevent unnecessary AI calls & spam replies)
+            prefilter_reason = _should_prefilter_message(body, is_voice)
+            if prefilter_reason:
+                logging.info(f"🔕 Pre-filter: Dropped {prefilter_reason} message {msg_id} from {chat_id} ('{body[:35]}')")
                 update_queue_status(msg_id, "ignored")
                 return
 
