@@ -191,6 +191,7 @@ def init_db():
         ('ignored_numbers_enabled', '1'),
         ('autostart_engine', '1'),
         ('cooldown_enabled', '1'),
+        ('cooldown_seconds', '30'),
         ('cooldown_minutes', '1'),
         ('human_takeover_enabled', '1'),
         ('human_takeover_minutes', '5'),
@@ -666,20 +667,20 @@ def record_reply_timestamp(chat_id: str):
     conn.commit()
     conn.close()
 
-def is_cooldown_active(chat_id: str, cooldown_minutes: float) -> bool:
-    if cooldown_minutes <= 0:
+def is_cooldown_active(chat_id: str, cooldown_seconds: float) -> bool:
+    if cooldown_seconds <= 0:
         return False
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT (julianday(datetime('now', 'localtime')) - julianday(last_replied_at)) * 1440 as mins_diff "
+        "SELECT (julianday(datetime('now', 'localtime')) - julianday(last_replied_at)) * 86400 as secs_diff "
         "FROM cooldown_ledger WHERE chat_id = ?;",
         (chat_id,)
     )
     row = cursor.fetchone()
     conn.close()
-    if row and row['mins_diff'] is not None:
-        return float(row['mins_diff']) < cooldown_minutes
+    if row and row['secs_diff'] is not None:
+        return float(row['secs_diff']) < cooldown_seconds
     return False
 
 def was_recently_replied_by_bot(chat_id: str, within_seconds: int = 15) -> bool:

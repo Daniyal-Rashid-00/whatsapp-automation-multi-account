@@ -248,11 +248,15 @@ class DurableQueueProcessor:
             cooldown_enabled = self._settings_cache.get("cooldown_enabled", "1") == "1"
             if cooldown_enabled:
                 try:
-                    cd_mins = float(self._settings_cache.get("cooldown_minutes", "10"))
-                except ValueError:
-                    cd_mins = 10.0
-                if is_cooldown_active(chat_id, cd_mins):
-                    logging.info(f"🔁 Cooldown active for {chat_id} ({cd_mins} mins). Skipping repeat auto-reply.")
+                    cd_val = self._settings_cache.get("cooldown_seconds", "")
+                    if cd_val:
+                        cd_secs = float(cd_val)
+                    else:
+                        cd_secs = float(self._settings_cache.get("cooldown_minutes", "1")) * 60.0
+                except (ValueError, TypeError):
+                    cd_secs = 30.0
+                if is_cooldown_active(chat_id, cd_secs):
+                    logging.info(f"🔁 Cooldown active for {chat_id} ({cd_secs:.0f}s). Skipping repeat auto-reply.")
                     update_queue_status(msg_id, "ignored")
                     return
 

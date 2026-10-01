@@ -245,12 +245,12 @@ class SettingsPage(QWidget):
         row_cd.addLayout(v_cd)
         row_cd.addStretch()
 
-        self.spn_cooldown_mins = QSpinBox()
-        self.spn_cooldown_mins.setRange(1, 1440)
-        self.spn_cooldown_mins.setSuffix(" Mins")
-        self.spn_cooldown_mins.setValue(1)
-        self.spn_cooldown_mins.setFixedWidth(90)
-        row_cd.addWidget(self.spn_cooldown_mins)
+        self.spn_cooldown_secs = QSpinBox()
+        self.spn_cooldown_secs.setRange(1, 86400)
+        self.spn_cooldown_secs.setSuffix(" Secs")
+        self.spn_cooldown_secs.setValue(30)
+        self.spn_cooldown_secs.setFixedWidth(90)
+        row_cd.addWidget(self.spn_cooldown_secs)
         toggles_grid.addLayout(row_cd)
 
         # Divider line
@@ -651,9 +651,14 @@ class SettingsPage(QWidget):
         self.tog_autostart.setChecked(get_setting("autostart_engine", "1") == "1")
         self.tog_cooldown.setChecked(get_setting("cooldown_enabled", "1") == "1")
         try:
-            self.spn_cooldown_mins.setValue(int(get_setting("cooldown_minutes", "1")))
-        except ValueError:
-            pass
+            cd_sec_val = get_setting("cooldown_seconds", "")
+            if cd_sec_val:
+                self.spn_cooldown_secs.setValue(int(float(cd_sec_val)))
+            else:
+                mins_val = int(float(get_setting("cooldown_minutes", "1")))
+                self.spn_cooldown_secs.setValue(max(1, mins_val * 60))
+        except (ValueError, TypeError):
+            self.spn_cooldown_secs.setValue(30)
 
         self.tog_takeover.setChecked(get_setting("human_takeover_enabled", "1") == "1")
         try:
@@ -686,7 +691,8 @@ class SettingsPage(QWidget):
         set_setting("ignore_groups", "1" if self.tog_ignore_groups.isChecked() else "0")
         set_setting("autostart_engine", "1" if self.tog_autostart.isChecked() else "0")
         set_setting("cooldown_enabled", "1" if self.tog_cooldown.isChecked() else "0")
-        set_setting("cooldown_minutes", str(self.spn_cooldown_mins.value()))
+        set_setting("cooldown_seconds", str(self.spn_cooldown_secs.value()))
+        set_setting("cooldown_minutes", str(max(1, self.spn_cooldown_secs.value() // 60)))
         set_setting("human_takeover_enabled", "1" if self.tog_takeover.isChecked() else "0")
         set_setting("human_takeover_minutes", str(self.spn_takeover_mins.value()))
         set_setting("ignored_numbers_enabled", "1" if self.tog_ignored_numbers.isChecked() else "0")
