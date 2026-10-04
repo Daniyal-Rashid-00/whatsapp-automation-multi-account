@@ -204,13 +204,11 @@ def build_llm_request(rules_context: str, context_box_text: str, sender_id: str,
         "1. SEMANTIC INTENT MATCHING: Customers will ask questions in Roman Urdu (e.g. 'ha?', 'milega?', 'price kya ha?', 'customize shirt ha?'), Urdu, or English with typos or natural phrasing. If their message refers to any Topic / Product in the list below, provide that product's pre-configured details and price.\n"
         "2. NATURAL & POLITE: Reply politely in Roman Urdu matching the customer's language. Keep replies short (1-2 sentences max). Do NOT use bold (*bold*), italic (_italic_), or emojis. Make replies sound natural like a real human assistant, not a robotic AI.\n"
         "3. ACCURACY & GROUNDING: Use ONLY the information, pricing, and policies from the list below. Do not invent new prices or make up fake products.\n"
-        "4. UNRELATED INQUIRIES & SILENCE: If the customer sends an address, personal name, random chit-chat, simple acknowledgement ('ok', 'theek hai', 'g', 'thanks'), or something unrelated to any topic in the list below, respond with ONLY the exact single word: CANNOT_ANSWER. Never output your internal thinking, chain of thought, explanations, or phrases like '(No response)'.\n"
+        "4. UNKNOWN TOPICS & ORDER TRACKING SILENCE: If the customer message is about parcel tracking, existing order status ('parcel kidr tak puhncha?', 'kahan hai parcel', 'tcs office aa gaya?', 'dispatch hua?', 'ab kal jaye ya phr kuch din tak?'), complaints, address details, or ANY question you are not 100% sure about, respond with ONLY the exact single word: CANNOT_ANSWER. You do NOT have tracking data. Let human handle it. Never guess or invent dates. Never output your internal thinking.\n"
         "5. CRITICAL — NO REASONING OUTPUT: You MUST output ONLY the final reply to send to the customer. NEVER output your thought process, analysis, guidelines references, rule names, or any meta-commentary. Output ONLY the actual message text.\n"
-        "6. HARD POLICY CONSTRAINTS (NEVER OVERRIDE): Delivery time is ALWAYS 3 to 6 days. If customer asks for delivery tomorrow or in 1-2 days, state firmly: 'Delivery 3 se 6 din lagti hai, is se jaldi possible nahi.' Never say yes, ok, or agree to faster delivery or price reductions.\n\n"
+        "6. HARD POLICY CONSTRAINTS (NEVER OVERRIDE): Delivery time is ALWAYS 3 to 5 days. If customer asks for delivery tomorrow or in 1-2 days, state firmly: 'Delivery 3 se 5 din lagti hai, is se jaldi possible nahi.' Never say yes, ok, or agree to faster delivery or price reductions.\n\n"
         "=== [PRE-CONFIGURED PRODUCTS & ANSWERS] ===\n"
-        f"{rules_context}\n\n"
-        "=== [ADDITIONAL KNOWLEDGE BASE] ===\n"
-        f"{base_system}"
+        f"{rules_context}"
     )
 
     metadata_note = f"Customer WhatsApp ID: {sender_id}."
@@ -355,9 +353,7 @@ async def generate_ai_response(
                 "2. Answer their questions directly, politely, and realistically in concise Roman Urdu.\n"
                 "3. Keep the reply short and natural like a real human support assistant.\n\n"
                 "=== [PRE-CONFIGURED PRODUCTS & ANSWERS] ===\n"
-                f"{rules_context}\n\n"
-                "=== [KNOWLEDGE BASE] ===\n"
-                f"{context_text}"
+                f"{rules_context}"
             )
         else:
             user_parts.append({"text": req_payload["messages"][0]["content"]})

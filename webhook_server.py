@@ -12,7 +12,8 @@ from database import (
     set_human_takeover,
     was_recently_replied_by_bot,
     is_number_excluded,
-    remember_lid_mapping
+    remember_lid_mapping,
+    save_conversation_turn
 )
 
 app = FastAPI(title="NexusAutomata Webhook Gateway")
@@ -107,6 +108,21 @@ async def receive_webhook(request: Request):
                             takeover_mins = 60.0
                         set_human_takeover(customer_chat_id, takeover_mins)
                         logging.info(f"🤝 Human agent manual reply to {customer_chat_id} via [{session}]. Bot auto-reply paused for {takeover_mins} mins.")
+
+                    # Save human agent's manual reply to AI conversation history so AI has true context!
+                    if body and body.strip() and not is_voice:
+                        try:
+                            context_max_pairs = int(get_setting("ai_context_max_pairs", "3"))
+                            save_conversation_turn(
+                                chat_id=customer_chat_id,
+                                session_name=session or "default",
+                                role="assistant",
+                                content=body.strip(),
+                                max_pairs=context_max_pairs
+                            )
+                            logging.info(f"📝 Saved human agent reply to AI history for {customer_chat_id} ('{body[:35]}')")
+                        except Exception as hist_err:
+                            logging.warning(f"Failed to record human turn in history: {hist_err}")
             return {"status": "ignored_self"}
 
         logging.info(f"📩 Webhook received message {message_id} from {chat_id} (body: '{body[:60]}', isVoice: {is_voice}) via [{session}]")
