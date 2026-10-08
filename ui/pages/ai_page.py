@@ -2,12 +2,13 @@ import threading
 import asyncio
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QComboBox, QLineEdit, QTextEdit, QPushButton, QMessageBox, QFrame, QScrollArea
+    QComboBox, QLineEdit, QTextEdit, QPushButton, QMessageBox, QFrame, QScrollArea, QDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from database import get_setting, set_setting
 from vault import store_secret, retrieve_secret, delete_secret
 from ui.widgets.toggle_switch import ToggleSwitch
+from ui.widgets.prompt_editor import PromptSearchToolbar, ResizeHandleBar, FullscreenPromptDialog
 from ai_key_pool import key_pool
 from ai_engine import test_ai_connection
 
@@ -299,10 +300,20 @@ class AIPage(QWidget):
         # 5. System Knowledge Base Sandbox
         v_ctx = QVBoxLayout()
         v_ctx.setSpacing(4)
+
+        # Header row with title and real-time statistics
+        h_ctx_header = QHBoxLayout()
         lbl_ctx = QLabel("SYSTEM KNOWLEDGE BASE SANDBOX (SOPs, Pricing, Returns, Policies):")
         lbl_ctx.setStyleSheet("font-weight: 600; font-size: 11px; color: #8B949E;")
-        v_ctx.addWidget(lbl_ctx)
+        h_ctx_header.addWidget(lbl_ctx)
+        h_ctx_header.addStretch()
 
+        self.lbl_prompt_stats = QLabel("")
+        self.lbl_prompt_stats.setStyleSheet("font-size: 11px; color: #8B949E;")
+        h_ctx_header.addWidget(self.lbl_prompt_stats)
+        v_ctx.addLayout(h_ctx_header)
+
+        # Prompt text editor
         self.txt_system_context = QTextEdit()
         self.txt_system_context.setPlaceholderText(
             "STORE NAME: CyberCraft Store Pakistan\n"
@@ -313,9 +324,46 @@ class AIPage(QWidget):
             "• Delivery Time: 2 to 4 working days.\n"
             "• Payment Method: Cash on Delivery (COD) available for all non-customized items.\n"
         )
-        self.txt_system_context.setMinimumHeight(130)
-        self.txt_system_context.setMaximumHeight(220)
+        self.txt_system_context.setStyleSheet("""
+            QTextEdit {
+                background-color: #0D1117;
+                border: 1px solid #30363D;
+                border-top: none;
+                border-bottom: none;
+                border-radius: 0px;
+                color: #C9D1D9;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 12px;
+                line-height: 1.4;
+                padding: 8px 10px;
+            }
+            QTextEdit:focus {
+                border-color: #58A6FF;
+            }
+        """)
+
+        # Search Toolbar (sits directly above editor)
+        self.prompt_search_toolbar = PromptSearchToolbar(self.txt_system_context)
+        v_ctx.addWidget(self.prompt_search_toolbar)
+
+        # Editor itself with customizable height
+        saved_h = 280
+        try:
+            saved_h = int(get_setting("ai_prompt_editor_height", "280"))
+        except ValueError:
+            saved_h = 280
+        self.txt_system_context.setFixedHeight(max(150, min(1200, saved_h)))
+        self.txt_system_context.textChanged.connect(self._update_prompt_stats)
         v_ctx.addWidget(self.txt_system_context)
+
+        # Resizable Handle Bar at bottom (drag + presets + popout)
+        self.prompt_resize_handle = ResizeHandleBar(
+            self.txt_system_context,
+            min_h=150,
+            max_h=1200,
+            on_popout=self._open_fullscreen_prompt_editor
+        )
+        v_ctx.addWidget(self.prompt_resize_handle)
 
         card_layout.addLayout(v_ctx)
 
@@ -498,6 +546,7 @@ class AIPage(QWidget):
 
         context = get_setting("ai_system_context", "")
         self.txt_system_context.setText(context)
+        self._update_prompt_stats()
 
         # Load Keys (5 Slots)
         k1 = retrieve_secret("nexus_ai_key") or ""
@@ -633,4 +682,18 @@ class AIPage(QWidget):
 
         self._update_pool_status_badge()
         QMessageBox.information(self, "Vault Saved", "All 5 API key slots and AI configuration saved securely!")
+
+    def _update_prompt_stats(self):
+        text = self.txt_system_context.toPlainText()
+        chars = len(text)
+        words = len(text.split()) if text.strip() else 0
+        lines = len(text.splitlines()) if text else 0
+        self.lbl_prompt_stats.setText(f"Lines: {lines} | Words: {words} | Characters: {chars}")
+
+    def _open_fullscreen_prompt_editor(self):
+        current_text = self.txt_system_context.toPlainText()
+        dialog = FullscreenPromptDialog(current_text, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.txt_system_context.setPlainText(dialog.get_text())
+            self._update_prompt_stats()
 
