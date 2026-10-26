@@ -54,6 +54,19 @@ def evaluate_rule_match(inbound_message: str, operator: str, keyword_target: str
 
     return False
 
+def is_session_target_match(target: str, session_name: str) -> bool:
+    """
+    Checks if an account target matches the receiving session name.
+    Normalizes case, whitespace, and 'account_' prefixes (e.g. 'account_gc' matches 'gc', 'GC', or 'account_gc').
+    """
+    if not target or not session_name:
+        return False
+    t = target.strip().lower()
+    s = session_name.strip().lower()
+    if t == s:
+        return True
+    return t.replace("account_", "") == s.replace("account_", "")
+
 def match_inbound_message(inbound_body: str, rules: List[Dict[str, Any]], session_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     Scans active rules and returns the best matching rule or None.
@@ -71,7 +84,7 @@ def match_inbound_message(inbound_body: str, rules: List[Dict[str, Any]], sessio
             if not rule.get('is_enabled', 1):
                 continue
             target = rule.get('account_target', 'ALL')
-            if target and target.upper() != 'ALL' and target == session_name:
+            if target and target.upper() != 'ALL' and is_session_target_match(target, session_name):
                 if evaluate_rule_match(inbound_body, rule['matching_operator'], rule['keyword_payload']):
                     return rule
 

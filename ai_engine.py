@@ -5,6 +5,7 @@ import base64
 import re
 from typing import Optional, Dict, Any, Tuple
 from database import get_setting, get_all_rules
+from rule_engine import is_session_target_match
 from vault import retrieve_secret
 
 from ai_key_pool import key_pool
@@ -206,7 +207,8 @@ def build_llm_request(rules_context: str, context_box_text: str, sender_id: str,
         "3. ACCURACY & GROUNDING: Use ONLY the information, pricing, and policies from the list below. Do not invent new prices or make up fake products.\n"
         "4. UNKNOWN TOPICS & ORDER TRACKING SILENCE: If the customer message is about parcel tracking, existing order status ('parcel kidr tak puhncha?', 'kahan hai parcel', 'tcs office aa gaya?', 'dispatch hua?', 'ab kal jaye ya phr kuch din tak?'), complaints, address details, or ANY question you are not 100% sure about, respond with ONLY the exact single word: CANNOT_ANSWER. You do NOT have tracking data. Let human handle it. Never guess or invent dates. Never output your internal thinking.\n"
         "5. CRITICAL — NO REASONING OUTPUT: You MUST output ONLY the final reply to send to the customer. NEVER output your thought process, analysis, guidelines references, rule names, or any meta-commentary. Output ONLY the actual message text.\n"
-        "6. HARD POLICY CONSTRAINTS (NEVER OVERRIDE): Delivery time is ALWAYS 3 to 5 days. If customer asks for delivery tomorrow or in 1-2 days, state firmly: 'Delivery 3 se 5 din lagti hai, is se jaldi possible nahi.' Never say yes, ok, or agree to faster delivery or price reductions.\n\n"
+        "6. HARD POLICY CONSTRAINTS (NEVER OVERRIDE): Delivery time is ALWAYS 3 to 5 days. If customer asks for delivery tomorrow or in 1-2 days, state firmly: 'Delivery 3 se 5 din lagti hai, is se jaldi possible nahi.' Never say yes, ok, or agree to faster delivery or price reductions.\n"
+        "7. ANTI-REPETITION & CONVERSATIONAL CONTEXT: Carefully read the previous turns in the conversation. If you already gave the customer an answer (e.g. price or delivery time) in recent messages and they repeat the question or ask for a compromise, acknowledge politely and briefly without repeating identical sentences verbatim, or return CANNOT_ANSWER if they keep looping.\n\n"
         "=== [PRE-CONFIGURED PRODUCTS & ANSWERS] ===\n"
         f"{rules_context}"
     )
@@ -223,7 +225,7 @@ def build_llm_request(rules_context: str, context_box_text: str, sender_id: str,
         ],
         "generation_config": {
             "max_output_tokens": 350,
-            "temperature": 0.2
+            "temperature": 0.35
         }
     }
 
@@ -317,7 +319,7 @@ async def generate_ai_response(
             continue
         target = r.get('account_target', 'ALL')
         # Include if global rule OR matches the current session
-        if not target or target.upper() == 'ALL' or (session_name and target == session_name):
+        if not target or target.upper() == 'ALL' or (session_name and is_session_target_match(target, session_name)):
             rules_lines.append(f"- Topic / Product: '{r['rule_name']}' | Keywords: {r['keyword_payload']} | Pre-configured Answer: \"{r['response_message']}\"")
     rules_context = "\n".join(rules_lines) if rules_lines else "No static rules configured."
     context_text = get_setting("ai_system_context", "")
@@ -436,7 +438,7 @@ async def generate_ai_response(
     # =========================================================================
     openrouter_key = key_pool.get_openrouter_key()
     if openrouter_key:
-        or_model = get_setting("openrouter_model_name", "nvidia/nemotron-3-super-120b-a12b:free").strip() or "nvidia/nemotron-3-super-120b-a12b:free"
+        or_model = get_setting("openrouter_model_name", "openrouter/free").strip() or "openrouter/free"
         logging.info(f"🔄 Cascading to Tier 2: OpenRouter Failover (Slot 4, Model: {or_model})...")
         req_payload = build_llm_request(rules_context, context_text, sender_id, source_hint, inbound_body, or_model)
 
@@ -452,7 +454,7 @@ async def generate_ai_response(
             "model": or_model,
             "messages": or_messages,
             "max_tokens": 350,
-            "temperature": 0.2
+            "temperature": 0.35
         }
         or_headers = {
             "Authorization": f"Bearer {openrouter_key}",
@@ -489,7 +491,7 @@ async def generate_ai_response(
     # =========================================================================
     groq_key = key_pool.get_groq_key()
     if groq_key:
-        groq_model = get_setting("groq_model_name", "openai/gpt-oss-20b").strip() or "openai/gpt-oss-20b"
+        groq_model = get_setting("groq_model_name", "llama-3.3-70b-versatile").strip() or "llama-3.3-70b-versatile"
         logging.info(f"🔄 Cascading to Tier 3: Groq Cloud Failover (Slot 5, Model: {groq_model})...")
         req_payload = build_llm_request(rules_context, context_text, sender_id, source_hint, inbound_body, groq_model)
 
@@ -504,7 +506,7 @@ async def generate_ai_response(
             "model": groq_model,
             "messages": groq_messages,
             "max_tokens": 350,
-            "temperature": 0.2
+            "temperature": 0.35
         }
         groq_headers = {
             "Authorization": f"Bearer {groq_key}",

@@ -1,5 +1,11 @@
 import os
+import sys
 import pytest
+
+# Ensure project root is always in sys.path
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 TEST_DB_PATH = "test_nexus_automata.db"
 

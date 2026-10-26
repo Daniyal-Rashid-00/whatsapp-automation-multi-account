@@ -210,6 +210,19 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
       if (fs.existsSync(singletonCookie)) {
         fs.rmSync(singletonCookie, { force: true });
       }
+
+      // Prune disposable Chromium web caches on startup to prevent RAM/disk bloat
+      const disposableDirs = [
+        path.join(profileDir, 'Default', 'Cache'),
+        path.join(profileDir, 'Default', 'Code Cache'),
+        path.join(profileDir, 'Default', 'GPUCache'),
+        path.join(profileDir, 'Default', 'Service Worker', 'CacheStorage')
+      ];
+      for (const d of disposableDirs) {
+        if (fs.existsSync(d)) {
+          try { fs.rmSync(d, { recursive: true, force: true }); } catch (e) {}
+        }
+      }
     } catch (e) {}
 
     const client = new Client({
@@ -243,6 +256,9 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
           '--hide-crash-restore-bubble',
           '--no-default-browser-check',
           '--js-flags=--max-old-space-size=512',
+          '--disk-cache-size=104857600',
+          '--media-cache-size=52428800',
+          '--disable-application-cache',
           '--disable-extensions',
           '--disable-sync',
           '--disable-default-apps',
@@ -365,14 +381,20 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
         if (!msg) return;
         const messageId = (msg.id && msg.id._serialized) ? msg.id._serialized : ((msg.id && msg.id.id) ? msg.id.id : String(Date.now()));
         
-        // Prevent duplicate processing
-        if (processedMsgIds.has(messageId)) return;
-        processedMsgIds.add(messageId);
-
         const fromJid = msg.from || '';
         const toJid = msg.to || '';
         const isFromMe = Boolean(msg.fromMe);
         const body = msg.body || '';
+        const msgTypeInit = String(msg.type || '').toLowerCase();
+        const isVoiceInit = msgTypeInit === 'ptt' || msgTypeInit === 'audio' || msgTypeInit === 'voice';
+        const hasMediaInit = Boolean(msg.hasMedia) || isVoiceInit;
+
+        // Prevent duplicate processing - do not lock undecrypted empty stubs before body arrives
+        if (processedMsgIds.has(messageId)) return;
+        const isEmptyPlaceholder = !isFromMe && !body.trim() && !hasMediaInit && !isVoiceInit;
+        if (!isEmptyPlaceholder) {
+          processedMsgIds.add(messageId);
+        }
 
         // Skip status broadcast and groups
         if (fromJid.endsWith('@g.us') || toJid.endsWith('@g.us') || fromJid.includes('@broadcast') || fromJid === 'status@broadcast') return;

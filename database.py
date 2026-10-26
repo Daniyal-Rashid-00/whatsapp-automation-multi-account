@@ -205,7 +205,9 @@ def init_db():
         ('ai_slot_5_enabled', '1'),
         ('ai_context_enabled', '1'),
         ('ai_context_max_pairs', '3'),
-        ('ai_context_expiry_hours', '24')
+        ('ai_context_expiry_hours', '24'),
+        ('openrouter_model_name', 'openrouter/free'),
+        ('groq_model_name', 'llama-3.3-70b-versatile')
     ]
     
     for key, val in default_settings:
@@ -221,12 +223,33 @@ def init_db():
     reset_session_queue_on_startup()
     sync_session_folders_to_db()
 
+def cleanup_stale_records():
+    """
+    Auto-prunes expired database rows to prevent unbounded SQLite bloat:
+    - ai_conversation_history older than 7 days
+    - cooldown_ledger older than 2 days
+    - human_takeover_ledger expired over 2 days ago
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM ai_conversation_history WHERE created_at < datetime('now', 'localtime', '-7 days');")
+        cursor.execute("DELETE FROM cooldown_ledger WHERE last_replied_at < datetime('now', 'localtime', '-2 days');")
+        cursor.execute("DELETE FROM human_takeover_ledger WHERE takeover_until < datetime('now', 'localtime', '-2 days');")
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        import logging
+        logging.warning(f"[cleanup] Stale record pruning error: {e}")
+
 def reset_session_queue_on_startup():
     """
     Clears all past queue items, message dedup hashes, and send logs so that
     the software always starts with 0 messages queued and a clean activity log.
     Prevents backlog processing or hanging upon launching.
+    Also auto-cleans stale context history, cooldowns, and takeover records.
     """
+    cleanup_stale_records()
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM inbound_queue;")

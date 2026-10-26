@@ -212,7 +212,7 @@ class AIPage(QWidget):
         lbl_m2.setStyleSheet("font-size: 10px; font-weight: 600; color: #8B949E;")
         v_m2.addWidget(lbl_m2)
         self.txt_model_openrouter = QLineEdit()
-        self.txt_model_openrouter.setPlaceholderText("nvidia/nemotron-3-super-120b-a12b:free")
+        self.txt_model_openrouter.setPlaceholderText("openrouter/free")
         self.txt_model_openrouter.editingFinished.connect(self._save_settings)
         v_m2.addWidget(self.txt_model_openrouter)
         row_models_grid.addLayout(v_m2, stretch=1)
@@ -224,7 +224,7 @@ class AIPage(QWidget):
         lbl_m3.setStyleSheet("font-size: 10px; font-weight: 600; color: #8B949E;")
         v_m3.addWidget(lbl_m3)
         self.txt_model_groq = QLineEdit()
-        self.txt_model_groq.setPlaceholderText("openai/gpt-oss-20b")
+        self.txt_model_groq.setPlaceholderText("llama-3.3-70b-versatile")
         self.txt_model_groq.editingFinished.connect(self._save_settings)
         v_m3.addWidget(self.txt_model_groq)
         row_models_grid.addLayout(v_m3, stretch=1)
@@ -538,10 +538,10 @@ class AIPage(QWidget):
             model = "gemini-3.5-flash-lite"
         self.txt_model_id.setText(model)
 
-        or_model = get_setting("openrouter_model_name", "nvidia/nemotron-3-super-120b-a12b:free")
+        or_model = get_setting("openrouter_model_name", "openrouter/free")
         self.txt_model_openrouter.setText(or_model)
 
-        groq_model = get_setting("groq_model_name", "openai/gpt-oss-20b")
+        groq_model = get_setting("groq_model_name", "llama-3.3-70b-versatile")
         self.txt_model_groq.setText(groq_model)
 
         context = get_setting("ai_system_context", "")
@@ -575,8 +575,8 @@ class AIPage(QWidget):
 
     def _test_all_connections_clicked(self):
         gemini_model = self.txt_model_id.text().strip() or "gemini-3.5-flash-lite"
-        or_model = self.txt_model_openrouter.text().strip() or "nvidia/nemotron-3-super-120b-a12b:free"
-        groq_model = self.txt_model_groq.text().strip() or "openai/gpt-oss-20b"
+        or_model = self.txt_model_openrouter.text().strip() or "openrouter/free"
+        groq_model = self.txt_model_groq.text().strip() or "llama-3.3-70b-versatile"
 
         keys_to_test = [
             (1, "Slot 1 (Gemini 1)", self.txt_api_key_1.text().strip() or retrieve_secret("nexus_ai_key") or "", gemini_model, "gemini"),
@@ -652,8 +652,8 @@ class AIPage(QWidget):
         selected_mode = "ai_only" if self.cmb_operating_mode.currentIndex() == 1 else "hybrid"
         set_setting("ai_operating_mode", selected_mode)
         set_setting("ai_model_name", self.txt_model_id.text().strip() or "gemini-3.5-flash-lite")
-        set_setting("openrouter_model_name", self.txt_model_openrouter.text().strip() or "nvidia/nemotron-3-super-120b-a12b:free")
-        set_setting("groq_model_name", self.txt_model_groq.text().strip() or "openai/gpt-oss-20b")
+        set_setting("openrouter_model_name", self.txt_model_openrouter.text().strip() or "openrouter/free")
+        set_setting("groq_model_name", self.txt_model_groq.text().strip() or "llama-3.3-70b-versatile")
 
     def _save_all_ai_settings(self):
         self._save_settings()

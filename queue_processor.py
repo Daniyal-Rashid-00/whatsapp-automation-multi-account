@@ -29,7 +29,7 @@ from waha_client import WAHAClient
 # =============================================================================
 
 _ACK_PHRASES = {
-    "ok", "okay", "k", "g", "ji", "hm", "hmm", "ha", "han", "haan",
+    "ok", "okay", "k", "g", "ji", "hm", "hmm", "ha", "han", "haan", "hai", "h",
     "theek", "theek ha", "theek hai", "thik ha", "thik hai", "thk", "thk ha", "thk hai",
     "accha", "acha", "achha", "acha ji", "accha ji", "achha ji",
     "thanks", "thank you", "thx", "shukriya", "shukria", "jazakallah", "jazak allah",
@@ -48,11 +48,18 @@ _ADDRESS_KEYWORDS = {
     "village", "chak", "teh", "distt", "dakkhana", "post office",
 }
 
+_INQUIRY_WORDS = {
+    "kya", "kia", "kea", "kitna", "kitne", "kitny", "charges", "hogi", "hoga",
+    "delivery", "deliver", "available", "possible", "chahiye", "chahye", "chahiyay",
+    "bhejte", "bhejo", "bhejen", "karain", "karte", "mil", "milega", "milegi", "rate", "cost", "price"
+}
+
 
 def _should_prefilter_message(body: str, is_voice: bool) -> Optional[str]:
     """
     Checks if an inbound text message should be filtered out at code-level before reaching AI.
     Returns a reason string ('acknowledgement' or 'address') if it should be dropped, or None if it should proceed.
+    Guards customer questions (e.g. 'kya lahore near gulberg delivery ho jaye gi?') from being falsely dropped as addresses.
     """
     if is_voice or not body:
         return None
@@ -67,6 +74,10 @@ def _should_prefilter_message(body: str, is_voice: bool) -> Optional[str]:
     words = clean_punc.split()
     if 1 <= len(words) <= 3 and all(w in _ACK_PHRASES for w in words):
         return f"acknowledgement phrase ('{clean_punc}')"
+
+    # If message is clearly an inquiry/question, NEVER drop as address
+    if "?" in body_clean or any(re.search(rf"\b{re.escape(w)}\b", body_clean) for w in _INQUIRY_WORDS):
+        return None
 
     # 2. Address / Contact details check
     has_phone_or_postal = bool(re.search(r'\b\d{7,13}\b', body))
