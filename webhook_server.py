@@ -11,6 +11,7 @@ from database import (
     enqueue_inbound_message,
     set_human_takeover,
     was_recently_replied_by_bot,
+    was_recently_sent_same_message,
     is_number_excluded,
     remember_lid_mapping,
     save_conversation_turn
@@ -84,11 +85,15 @@ async def receive_webhook(request: Request):
         if from_me:
             customer_chat_id = payload.get("to") or payload.get("chatId") or chat_id
             if customer_chat_id:
-                # 1. Ignore if bot recently sent an automated reply to this customer within 15 seconds
-                if was_recently_replied_by_bot(customer_chat_id, within_seconds=15):
+                # 1. Ignore if bot recently sent an automated reply to this customer within 30 seconds
+                if was_recently_replied_by_bot(customer_chat_id, within_seconds=30):
                     return {"status": "ignored_bot_reply"}
 
-                # 2. Ignore historical sync messages older than 60 seconds
+                # 2. Ignore if this exact message content was just sent by the bot (prevents duplicate assistant history turns)
+                if body and was_recently_sent_same_message(customer_chat_id, body.strip(), within_minutes=2.0):
+                    return {"status": "ignored_bot_reply"}
+
+                # 3. Ignore historical sync messages older than 60 seconds
                 msg_timestamp = payload.get("t") or payload.get("timestamp")
                 is_historical = False
                 if msg_timestamp:
@@ -109,7 +114,7 @@ async def receive_webhook(request: Request):
                         set_human_takeover(customer_chat_id, takeover_mins)
                         logging.info(f"🤝 Human agent manual reply to {customer_chat_id} via [{session}]. Bot auto-reply paused for {takeover_mins} mins.")
 
-                    # Save human agent's manual reply to AI conversation history so AI has true context!
+                    # Save genuine human agent's manual reply to AI conversation history so AI has true context
                     if body and body.strip() and not is_voice:
                         try:
                             context_max_pairs = int(get_setting("ai_context_max_pairs", "3"))

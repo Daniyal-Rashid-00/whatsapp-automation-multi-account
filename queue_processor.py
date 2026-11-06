@@ -13,6 +13,7 @@ from database import (
     get_setting,
     is_human_takeover_active,
     is_cooldown_active,
+    was_recently_sent_same_message,
     record_reply_timestamp,
     is_number_excluded,
     get_phone_for_lid,
@@ -310,6 +311,12 @@ class DurableQueueProcessor:
                     update_queue_status(msg_id, "ignored")
                     return
 
+                # Anti-Repetition Guard: Do not send identical AI reply if customer was already given it recently
+                if was_recently_sent_same_message(chat_id, ai_reply, within_minutes=15.0):
+                    logging.info(f"🔁 Anti-repetition: Dropped duplicate AI response to {chat_id} ('{ai_reply[:40]}...')")
+                    update_queue_status(msg_id, "ignored")
+                    return
+
                 allowed, reason = await check_and_apply_rate_limit(chat_id)
                 if not allowed:
                     logging.warning(f"Rate governor blocked AI dispatch for {msg_id}: {reason}")
@@ -318,8 +325,8 @@ class DurableQueueProcessor:
 
                 sent_ok = await self.waha_client.send_text(chat_id, ai_reply, session=session_name)
                 if sent_ok:
+                    record_reply_timestamp(chat_id)  # Record immediately upon text dispatch
                     update_queue_status(msg_id, "done")
-                    record_reply_timestamp(chat_id)
                     # Save conversation turns for next message's context
                     if context_enabled and body.strip():
                         try:
@@ -351,9 +358,18 @@ class DurableQueueProcessor:
 
                     # Dispatch text response using exact receiving session
                     resp_text = matched_rule.get('response_message', '')
+
+                    # Anti-Repetition Guard: Do not send identical rule response if already sent recently
+                    if resp_text and was_recently_sent_same_message(chat_id, resp_text, within_minutes=15.0):
+                        logging.info(f"🔁 Anti-repetition: Dropped duplicate rule response to {chat_id} ('{resp_text[:40]}...')")
+                        update_queue_status(msg_id, "ignored")
+                        return
+
                     send_success = True
                     if resp_text:
                         send_success = await self.waha_client.send_text(chat_id, resp_text, session=session_name)
+                        if send_success:
+                            record_reply_timestamp(chat_id)  # Record immediately upon text dispatch
 
                     # Dispatch file attachments if linked
                     attachments = matched_rule.get('attachments', [])
@@ -421,6 +437,12 @@ class DurableQueueProcessor:
                         update_queue_status(msg_id, "ignored")
                         return
 
+                    # Anti-Repetition Guard: Do not send identical AI reply if customer was already given it recently
+                    if was_recently_sent_same_message(chat_id, ai_reply, within_minutes=15.0):
+                        logging.info(f"🔁 Anti-repetition: Dropped duplicate AI response to {chat_id} ('{ai_reply[:40]}...')")
+                        update_queue_status(msg_id, "ignored")
+                        return
+
                     allowed, reason = await check_and_apply_rate_limit(chat_id)
                     if not allowed:
                         logging.warning(f"Rate governor blocked AI dispatch for {msg_id}: {reason}")
@@ -429,8 +451,8 @@ class DurableQueueProcessor:
 
                     sent_ok = await self.waha_client.send_text(chat_id, ai_reply, session=session_name)
                     if sent_ok:
+                        record_reply_timestamp(chat_id)  # Record immediately upon text dispatch
                         update_queue_status(msg_id, "done")
-                        record_reply_timestamp(chat_id)
                         # Save conversation turns for next message's context
                         if context_enabled and body.strip():
                             try:

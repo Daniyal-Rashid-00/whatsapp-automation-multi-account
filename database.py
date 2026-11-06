@@ -2,6 +2,7 @@ import sqlite3
 import os
 import json
 import threading
+import re
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 
@@ -678,46 +679,106 @@ def get_today_send_count() -> int:
     conn.close()
     return row['cnt'] if row else 0
 
-# --- Feature 1: Per-Customer Cooldown Operations ---
+# --- Feature 1: Per-Customer Cooldown & Anti-Repetition Operations ---
+def _get_related_chat_ids(chat_id: str) -> List[str]:
+    """Resolves related JIDs for chat_id across @lid <-> phone @c.us mappings."""
+    targets = {chat_id}
+    clean = "".join(ch for ch in str(chat_id).split("@")[0] if ch.isdigit())
+    if not clean:
+        return list(targets)
+
+    if "@lid" in str(chat_id):
+        mapped_phone = get_phone_for_lid(clean)
+        if mapped_phone:
+            targets.add(f"{mapped_phone}@c.us")
+            targets.add(mapped_phone)
+    else:
+        with _excluded_lock:
+            for lid, phone in _lid_to_phone_map.items():
+                if phone == clean:
+                    targets.add(f"{lid}@lid")
+                    targets.add(lid)
+    return list(targets)
+
 def record_reply_timestamp(chat_id: str):
+    """Records last bot reply timestamp for chat_id and any linked phone/LID JIDs."""
+    related = _get_related_chat_ids(chat_id)
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO cooldown_ledger (chat_id, last_replied_at) VALUES (?, datetime('now', 'localtime')) "
-        "ON CONFLICT(chat_id) DO UPDATE SET last_replied_at = datetime('now', 'localtime');",
-        (chat_id,)
-    )
+    for target in related:
+        cursor.execute(
+            "INSERT INTO cooldown_ledger (chat_id, last_replied_at) VALUES (?, datetime('now', 'localtime')) "
+            "ON CONFLICT(chat_id) DO UPDATE SET last_replied_at = datetime('now', 'localtime');",
+            (target,)
+        )
     conn.commit()
     conn.close()
 
 def is_cooldown_active(chat_id: str, cooldown_seconds: float) -> bool:
+    """Checks if chat_id (or any linked LID/phone) was replied to within cooldown_seconds."""
     if cooldown_seconds <= 0:
         return False
+    related = _get_related_chat_ids(chat_id)
+    placeholders = ",".join("?" for _ in related)
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT (julianday(datetime('now', 'localtime')) - julianday(last_replied_at)) * 86400 as secs_diff "
-        "FROM cooldown_ledger WHERE chat_id = ?;",
-        (chat_id,)
+        f"SELECT MIN((julianday(datetime('now', 'localtime')) - julianday(last_replied_at)) * 86400) as min_secs "
+        f"FROM cooldown_ledger WHERE chat_id IN ({placeholders});",
+        tuple(related)
     )
     row = cursor.fetchone()
     conn.close()
-    if row and row['secs_diff'] is not None:
-        return float(row['secs_diff']) < cooldown_seconds
+    if row and row['min_secs'] is not None:
+        return float(row['min_secs']) < cooldown_seconds
     return False
 
 def was_recently_replied_by_bot(chat_id: str, within_seconds: int = 15) -> bool:
+    """Checks if bot replied to chat_id (or linked LID/phone) within within_seconds."""
+    related = _get_related_chat_ids(chat_id)
+    placeholders = ",".join("?" for _ in related)
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT (julianday(datetime('now', 'localtime')) - julianday(last_replied_at)) * 86400 as secs_diff "
-        "FROM cooldown_ledger WHERE chat_id = ?;",
-        (chat_id,)
+        f"SELECT MIN((julianday(datetime('now', 'localtime')) - julianday(last_replied_at)) * 86400) as min_secs "
+        f"FROM cooldown_ledger WHERE chat_id IN ({placeholders});",
+        tuple(related)
     )
     row = cursor.fetchone()
     conn.close()
-    if row and row['secs_diff'] is not None:
-        return float(row['secs_diff']) < within_seconds
+    if row and row['min_secs'] is not None:
+        return float(row['min_secs']) < within_seconds
+    return False
+
+def was_recently_sent_same_message(chat_id: str, candidate_reply: str, within_minutes: float = 15.0) -> bool:
+    """
+    Checks if the exact same response was already sent to this customer
+    (or any linked LID/phone) within within_minutes.
+    Prevents repetitive auto-replies when customers loop the same query.
+    """
+    if not candidate_reply or not candidate_reply.strip():
+        return False
+    related = _get_related_chat_ids(chat_id)
+    placeholders = ",".join("?" for _ in related)
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        f"SELECT content FROM ai_conversation_history "
+        f"WHERE chat_id IN ({placeholders}) AND role = 'assistant' "
+        f"AND created_at >= datetime('now', 'localtime', '-' || ? || ' minutes') "
+        f"ORDER BY id DESC LIMIT 5;",
+        tuple(related) + (str(within_minutes),)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+
+    def _normalize(t: str) -> str:
+        return re.sub(r'\s+', ' ', t.strip().lower())
+
+    cand_norm = _normalize(candidate_reply)
+    for r in rows:
+        if _normalize(r['content']) == cand_norm:
+            return True
     return False
 
 # --- Feature 2: Human VA Takeover Operations ---

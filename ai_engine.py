@@ -20,7 +20,9 @@ _DEFAULT_SYSTEM_CONTEXT = (
 )
 
 _IGNORE_PHRASES = {
-    "cannot_answer", "cannot answer", "(no response)", "[no response]", "no response",
+    "cannot_answer", "cannot answer", "cannot", "can not", "cannot.", "cannot_answer.",
+    "i cannot", "i cannot answer", "i can not",
+    "(no response)", "[no response]", "no response",
     "(no reply)", "[no reply]", "no reply", "(ignored)", "[ignored]", "ignored",
     "n/a", "none", "null"
 }
@@ -142,11 +144,13 @@ def sanitize_ai_reply(reply: str) -> str:
     if lower_clean in _IGNORE_PHRASES:
         return ""
 
-    # 7. Check if text contains CANNOT_ANSWER or meta-response phrases — anywhere in the reply.
-    #    Use the full lower_text (not just lower_clean) so we catch embedded variants like
-    #    "Return CANNOT_ANSWER", "The answer is CANNOT_ANSWER", or "cannot_answer." mid-sentence.
-    if "cannot_answer" in lower_text or "cannot answer" in lower_text:
-        logging.info(f"[sanitize] Blocked CANNOT_ANSWER token in reply: {text[:60]!r}")
+    # 7. Check if text contains CANNOT_ANSWER, CANNOT, or meta-response phrases.
+    #    Catches exact tokens, embedded variants, or standalone 'CANNOT' (which models shorten to).
+    if ("cannot_answer" in lower_text or
+        "cannot answer" in lower_text or
+        lower_clean in _IGNORE_PHRASES or
+        (re.search(r'\b(?:cannot|can\s+not)\b', lower_text) and len(lower_clean.split()) <= 5)):
+        logging.info(f"[sanitize] Blocked CANNOT / meta-response token in reply: {text[:60]!r}")
         return ""
     if "(no response)" in lower_text or "[no response]" in lower_text or "(no reply)" in lower_text:
         return ""
@@ -205,7 +209,7 @@ def build_llm_request(rules_context: str, context_box_text: str, sender_id: str,
         "1. SEMANTIC INTENT MATCHING: Customers will ask questions in Roman Urdu (e.g. 'ha?', 'milega?', 'price kya ha?', 'customize shirt ha?'), Urdu, or English with typos or natural phrasing. If their message refers to any Topic / Product in the list below, provide that product's pre-configured details and price.\n"
         "2. NATURAL & POLITE: Reply politely in Roman Urdu matching the customer's language. Keep replies short (1-2 sentences max). Do NOT use bold (*bold*), italic (_italic_), or emojis. Make replies sound natural like a real human assistant, not a robotic AI.\n"
         "3. ACCURACY & GROUNDING: Use ONLY the information, pricing, and policies from the list below. Do not invent new prices or make up fake products.\n"
-        "4. UNKNOWN TOPICS & ORDER TRACKING SILENCE: If the customer message is about parcel tracking, existing order status ('parcel kidr tak puhncha?', 'kahan hai parcel', 'tcs office aa gaya?', 'dispatch hua?', 'ab kal jaye ya phr kuch din tak?'), complaints, address details, or ANY question you are not 100% sure about, respond with ONLY the exact single word: CANNOT_ANSWER. You do NOT have tracking data. Let human handle it. Never guess or invent dates. Never output your internal thinking.\n"
+        "4. UNKNOWN TOPICS & ORDER TRACKING SILENCE: If the customer message is about parcel tracking, existing order status ('parcel kidr tak puhncha?', 'kahan hai parcel', 'tcs office aa gaya?', 'dispatch hua?', 'ab kal jaye ya phr kuch din tak?'), complaints, address details, or ANY question you are not 100% sure about, respond with ONLY the exact single word: CANNOT_ANSWER. Never output 'CANNOT', and never output meta-commentary. You do NOT have tracking data. Let human handle it. Never guess or invent dates. Never output your internal thinking.\n"
         "5. CRITICAL — NO REASONING OUTPUT: You MUST output ONLY the final reply to send to the customer. NEVER output your thought process, analysis, guidelines references, rule names, or any meta-commentary. Output ONLY the actual message text.\n"
         "6. HARD POLICY CONSTRAINTS (NEVER OVERRIDE): Delivery time is ALWAYS 3 to 5 days. If customer asks for delivery tomorrow or in 1-2 days, state firmly: 'Delivery 3 se 5 din lagti hai, is se jaldi possible nahi.' Never say yes, ok, or agree to faster delivery or price reductions.\n"
         "7. ANTI-REPETITION & CONVERSATIONAL CONTEXT: Carefully read the previous turns in the conversation. If you already gave the customer an answer (e.g. price or delivery time) in recent messages and they repeat the question or ask for a compromise, acknowledge politely and briefly without repeating identical sentences verbatim, or return CANNOT_ANSWER if they keep looping.\n\n"
