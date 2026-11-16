@@ -380,7 +380,14 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
     const handleAnyMessage = async (msg) => {
       try {
         if (!msg) return;
-        const messageId = (msg.id && msg.id._serialized) ? msg.id._serialized : ((msg.id && msg.id.id) ? msg.id.id : String(Date.now()));
+
+        // Ensure msg.id._serialized exists for whatsapp-web.js internal evaluate calls (downloadMedia)
+        if (msg.id) {
+          if (!msg.id._serialized) {
+            msg.id._serialized = msg.id.$1 || (msg.id.remote ? `${msg.id.fromMe ? 'true' : 'false'}_${msg.id.remote}_${msg.id.id}` : msg.id.id);
+          }
+        }
+        const messageId = (msg.id && msg.id._serialized) ? msg.id._serialized : ((msg.id && (msg.id.$1 || msg.id.id)) ? (msg.id.$1 || msg.id.id) : String(Date.now()));
         
         const fromJid = msg.from || '';
         const toJid = msg.to || '';
@@ -438,15 +445,24 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
                       const cleanId = String(rawMsgId);
                       const shortId = cleanId.split('_').pop(); // e.g. AC45FC18DBC9B7C6B066F2FCE5BD675A
 
+                      const getModelId = (x) => {
+                        if (!x || !x.id) return '';
+                        if (typeof x.id === 'string') return x.id;
+                        return x.id._serialized || x.id.$1 || x.id.id || String(x.id);
+                      };
+
+                      const isMatch = (x) => {
+                        if (!x) return false;
+                        const sid = getModelId(x);
+                        return sid === cleanId || sid.includes(shortId) || (x.id && (x.id.id === shortId || x.id.$1 === cleanId || x.id.$1 === shortId));
+                      };
+
                       let m = null;
                       // 1. Search in global Msg collection
                       if (collections.Msg) {
                         m = collections.Msg.get(cleanId) || collections.Msg.get(shortId);
                         if (!m && collections.Msg.getModelsArray) {
-                          m = collections.Msg.getModelsArray().find(x => {
-                            const sid = x.id ? (x.id._serialized || x.id.id || String(x.id)) : '';
-                            return sid === cleanId || sid.includes(shortId);
-                          });
+                          m = collections.Msg.getModelsArray().find(isMatch);
                         }
                       }
 
@@ -455,10 +471,7 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
                         const chat = collections.Chat.get(targetChatId) || (collections.Chat.getModelsArray && collections.Chat.getModelsArray().find(c => String(c.id).includes(targetChatId)));
                         if (chat && chat.msgs) {
                           const chatMsgs = chat.msgs.getModelsArray ? chat.msgs.getModelsArray() : (chat.msgs.models || []);
-                          m = chatMsgs.find(x => {
-                            const sid = x.id ? (x.id._serialized || x.id.id || String(x.id)) : '';
-                            return sid === cleanId || sid.includes(shortId);
-                          });
+                          m = chatMsgs.find(isMatch);
                         }
                       }
 
@@ -1047,14 +1060,35 @@ app.get('/api/unread-messages', async (req, res) => {
               // Only chats with unreadCount > 0 or marked unread
               if (unread <= 0 && !markedUnread) continue;
 
-              // Find the last customer message
+              // Collect unread customer messages to preserve full conversation context in Catch-Up
               let lastMsg = null;
               const chatMsgs = c.msgs ? (c.msgs.getModelsArray ? c.msgs.getModelsArray() : (c.msgs.models || c.msgs._models || [])) : [];
+              const unreadTexts = [];
+              let hasVoice = false;
+              const unreadLimit = Math.max(unread, 1);
+              let collected = 0;
 
               for (let i = chatMsgs.length - 1; i >= 0; i--) {
                 const m = chatMsgs[i];
-                if (m && !m.fromMe && !m.id?.fromMe) {
+                if (!m) continue;
+                const isFromMe = Boolean(m.fromMe || (m.id && m.id.fromMe));
+                if (isFromMe) {
+                  // Hit prior agent/human reply — stop capturing previous thread
+                  break;
+                }
+                if (!lastMsg) {
                   lastMsg = m;
+                }
+                const mType = String(m.type || '').toLowerCase();
+                const mIsVoice = (mType === 'ptt' || mType === 'audio' || mType === 'voice');
+                if (mIsVoice) hasVoice = true;
+
+                const text = (m.body || m.caption || (mIsVoice ? '🎤 [Voice Note]' : '')).trim();
+                if (text) {
+                  unreadTexts.unshift(text); // Preserve chronological order
+                }
+                collected++;
+                if (collected >= unreadLimit && collected >= 5) {
                   break;
                 }
               }
@@ -1071,20 +1105,25 @@ app.get('/api/unread-messages', async (req, res) => {
                 continue; // Skip by time cutoff
               }
 
-              let body = '';
-              let isVoice = false;
-              let msgId = `UNREAD_${c.id._serialized}_${Date.now()}`;
+              let body = unreadTexts.length > 0 ? unreadTexts.join(" | ") : '';
+              let isVoice = hasVoice;
+              let msgId = `UNREAD_${c.id._serialized || c.id.$1 || c.id.user}_${Date.now()}`;
 
               if (lastMsg) {
-                msgId = lastMsg.id ? (lastMsg.id._serialized || lastMsg.id.id || msgId) : msgId;
-                body = lastMsg.body || lastMsg.caption || '';
-                const mType = String(lastMsg.type || '').toLowerCase();
-                isVoice = (mType === 'ptt' || mType === 'audio' || mType === 'voice');
-                if (isVoice && !body) {
-                  body = '🎤 [Voice Note]';
+                msgId = lastMsg.id ? (lastMsg.id._serialized || lastMsg.id.$1 || lastMsg.id.id || msgId) : msgId;
+                if (!body) {
+                  body = lastMsg.body || lastMsg.caption || '';
                 }
-              } else {
+                const mType = String(lastMsg.type || '').toLowerCase();
+                if (mType === 'ptt' || mType === 'audio' || mType === 'voice') {
+                  isVoice = true;
+                }
+              } else if (!body) {
                 body = c.previewMessage ? (c.previewMessage.body || c.previewMessage.caption || '') : '';
+              }
+
+              if (isVoice && !body) {
+                body = '🎤 [Voice Note]';
               }
 
               const customerName = c.formattedTitle || c.name || (c.contact ? (c.contact.pushname || c.contact.name || '') : '') || '';

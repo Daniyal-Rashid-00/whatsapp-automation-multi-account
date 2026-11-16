@@ -18,13 +18,18 @@ class WAHALauncher:
 
     @staticmethod
     def cleanup_orphaned_chrome_processes():
-        """Terminates any stale/orphaned Chromium processes left behind by previous app sessions to free leaked RAM."""
+        """Terminates any stale/orphaned Chromium and Node processes left behind by previous app sessions to free leaked RAM."""
         if os.name == 'nt':
             try:
+                cmd = (
+                    "Get-CimInstance Win32_Process | "
+                    "Where-Object { ($_.Name -like 'chrome*' -or $_.Name -like 'node*') -and ($_.CommandLine -like '*wa_web_engine*' -or $_.CommandLine -like '*session-account*') } | "
+                    "Stop-Process -Force -ErrorAction SilentlyContinue"
+                )
                 subprocess.run(
-                    ["powershell", "-Command", "Get-Process chrome -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*puppeteer*' -or $_.Path -like '*wa_web_engine*' } | Stop-Process -Force -ErrorAction SilentlyContinue"],
+                    ["powershell", "-NoProfile", "-Command", cmd],
                     capture_output=True,
-                    timeout=4,
+                    timeout=5,
                     creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
                 )
             except Exception:
@@ -126,6 +131,7 @@ class WAHALauncher:
                         subprocess.run(f"taskkill /F /T /PID {pid}", shell=True, capture_output=True)
             except Exception:
                 pass
+            cls.cleanup_orphaned_chrome_processes()
         return True
 
     @classmethod

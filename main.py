@@ -113,6 +113,7 @@ def main():
     # 6. Launch PyQt6 Desktop Application
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    app.aboutToQuit.connect(lambda: WAHALauncher.stop_waha_engine())
 
     window = MainWindow(queue_processor=processor)
     window.show()

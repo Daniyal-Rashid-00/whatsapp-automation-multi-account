@@ -282,6 +282,55 @@ async def transcribe_audio_groq(audio_base64: str, mime_type: str = "audio/ogg")
         logging.warning(f"Groq Whisper transcription exception: {e}")
     return None
 
+def build_gemini_contents(conversation_history: Optional[List[Dict[str, str]]], user_parts: list) -> list:
+    """
+    Constructs a Gemini API 'contents' array that strictly adheres to Google Gemini schema:
+      1. Every turn role must be either 'user' or 'model'.
+      2. The conversation must start with role 'user'.
+      3. Consecutive turns must strictly alternate: 'user' -> 'model' -> 'user' -> 'model'...
+         (consecutive identical roles are merged to prevent HTTP 400).
+      4. The final turn must be role 'user' containing user_parts.
+    """
+    if not conversation_history:
+        return [{"role": "user", "parts": user_parts}]
+
+    raw_turns = []
+    for turn in conversation_history:
+        content = (turn.get("content") or "").strip()
+        if not content:
+            continue
+        role = "model" if turn.get("role") == "assistant" else "user"
+        raw_turns.append({"role": role, "parts": [{"text": content}]})
+
+    # Append current inbound user message turn
+    raw_turns.append({"role": "user", "parts": user_parts})
+
+    # Drop leading 'model' turns until the first 'user' turn
+    start_idx = 0
+    while start_idx < len(raw_turns) and raw_turns[start_idx]["role"] != "user":
+        start_idx += 1
+
+    valid_turns = raw_turns[start_idx:]
+    if not valid_turns:
+        return [{"role": "user", "parts": user_parts}]
+
+    # Merge consecutive identical roles to guarantee strict alternating sequence
+    normalized_turns = []
+    for turn in valid_turns:
+        if not normalized_turns:
+            normalized_turns.append(turn)
+        elif normalized_turns[-1]["role"] == turn["role"]:
+            # Merge parts into the previous turn of same role
+            normalized_turns[-1]["parts"].extend(turn["parts"])
+        else:
+            normalized_turns.append(turn)
+
+    # Ensure the final turn is 'user'
+    if normalized_turns[-1]["role"] != "user":
+        normalized_turns.append({"role": "user", "parts": user_parts})
+
+    return normalized_turns
+
 async def generate_ai_response(
     sender_id: str,
     inbound_body: str,
@@ -370,20 +419,12 @@ async def generate_ai_response(
             gen_config["temperature"] = 0.4
             gen_config["max_output_tokens"] = 350
 
-        # Build Gemini contents array — inject conversation history for text-mode requests.
-        # NOTE: Gemini uses "model" role (not "assistant"). History is skipped for voice/audio
-        # because the multimodal format uses inline binary data, not plain-text turns.
-        if conversation_history and not audio_base64:
-            gemini_contents = []
-            for turn in conversation_history:
-                gemini_role = "model" if turn["role"] == "assistant" else "user"
-                gemini_contents.append({
-                    "role": gemini_role,
-                    "parts": [{"text": turn["content"]}]
-                })
-            gemini_contents.append({"role": "user", "parts": user_parts})
-        else:
-            gemini_contents = [{"role": "user", "parts": user_parts}]
+        # Build Gemini contents array — strictly adhering to alternating user/model schema
+        # History is skipped for raw audio fallback to keep multimodal binary payload clean.
+        gemini_contents = build_gemini_contents(
+            conversation_history if not audio_base64 else None,
+            user_parts
+        )
 
         gemini_body = {
             "contents": gemini_contents,
@@ -421,16 +462,18 @@ async def generate_ai_response(
                                         logging.info(f"AI returned ignore token ({raw_reply[:30]!r}). Silently ignoring for {sender_id}.")
                                         return DEFAULT_FALLBACK_REPLY
 
-                    # Handle 429 Rate Limiting or 401/403/400 Account Errors
+                    # Handle 429 Rate Limiting, 401/403 Account Errors, or 400 Bad Request
                     if resp.status_code == 429:
                         err_text = resp.text.lower()
                         is_quota = "quota" in err_text or "resource_exhausted" in err_text
                         cooldown = 1800.0 if is_quota else 30.0
                         key_pool.mark_rate_limited(current_k, cooldown_seconds=cooldown)
                         logging.warning(f"Tier 1 (Gemini) key 429 limit. Trying next slot...")
-                    elif resp.status_code in (400, 401, 403):
+                    elif resp.status_code in (401, 403):
                         key_pool.mark_rate_limited(current_k, cooldown_seconds=86400.0)
                         logging.warning(f"Tier 1 (Gemini) key unauthorized/disabled (HTTP {resp.status_code}). Removing key from rotation.")
+                    elif resp.status_code == 400:
+                        logging.warning(f"Tier 1 (Gemini) HTTP 400 Bad Request: {resp.text[:150]}. Payload issue, NOT disabling key.")
                     else:
                         logging.warning(f"Tier 1 (Gemini) attempt {attempt+1} status {resp.status_code}: {resp.text[:100]}")
             except Exception as e:
@@ -483,8 +526,10 @@ async def generate_ai_response(
                             return DEFAULT_FALLBACK_REPLY
                 elif resp.status_code == 429:
                     key_pool.mark_rate_limited(openrouter_key, cooldown_seconds=60.0)
-                elif resp.status_code in (400, 401, 403):
+                elif resp.status_code in (401, 403):
                     key_pool.mark_rate_limited(openrouter_key, cooldown_seconds=86400.0)
+                elif resp.status_code == 400:
+                    logging.warning(f"Tier 2 (OpenRouter) HTTP 400 Bad Request: {resp.text[:150]}. Payload issue, NOT disabling key.")
                 logging.warning(f"Tier 2 (OpenRouter) failed: {resp.status_code} {resp.text[:100]}")
         except Exception as e:
             logging.warning(f"Tier 2 (OpenRouter) exception: {e}")
@@ -533,8 +578,10 @@ async def generate_ai_response(
                             return DEFAULT_FALLBACK_REPLY
                 elif resp.status_code == 429:
                     key_pool.mark_rate_limited(groq_key, cooldown_seconds=60.0)
-                elif resp.status_code in (400, 401, 403):
+                elif resp.status_code in (401, 403):
                     key_pool.mark_rate_limited(groq_key, cooldown_seconds=86400.0)
+                elif resp.status_code == 400:
+                    logging.warning(f"Tier 3 (Groq) HTTP 400 Bad Request: {resp.text[:150]}. Payload issue, NOT disabling key.")
                 logging.warning(f"Tier 3 (Groq) failed: {resp.status_code} {resp.text[:100]}")
         except Exception as e:
             logging.warning(f"Tier 3 (Groq) exception: {e}")
