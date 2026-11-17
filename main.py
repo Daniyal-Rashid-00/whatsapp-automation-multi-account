@@ -68,6 +68,7 @@ def kickstart_all_sessions():
         time.sleep(2.0)
 
     accounts = get_all_accounts()
+    kickstarted_count = 0
 
     for acc in accounts:
         session_name = acc["session_name"]
@@ -78,6 +79,10 @@ def kickstart_all_sessions():
         if not is_enabled or not phone:
             continue
 
+        # Stagger subsequent account startups by 6 seconds to eliminate disk I/O and CPU collision
+        if kickstarted_count > 0:
+            time.sleep(6.0)
+
         try:
             resp = httpx.post(
                 f"{w_url}/api/sessions/start",
@@ -85,6 +90,7 @@ def kickstart_all_sessions():
                 timeout=8.0
             )
             if resp.status_code == 200:
+                kickstarted_count += 1
                 logging.info(f"Auto-kickstart sent for session [{session_name}] (phone: {phone})")
             else:
                 logging.warning(f"Auto-kickstart failed for [{session_name}]: {resp.status_code}")

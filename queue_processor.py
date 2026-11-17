@@ -110,6 +110,10 @@ class SettingsCache:
             self._refresh()
         return self._cache.get(key, default)
 
+    def invalidate(self):
+        self._last_fetch = 0.0
+        self._cache.clear()
+
     def _refresh(self):
         try:
             conn = get_db_connection()
@@ -272,8 +276,11 @@ class DurableQueueProcessor:
                     update_queue_status(msg_id, "ignored")
                     return
 
-            # Check AI Master Switch & Operating Mode
-            ai_master_on = self._settings_cache.get("ai_master_enabled", self._settings_cache.get("ai_fallback_enabled", "0")) == "1"
+            # Check AI Master Switch & Operating Mode (unify master and fallback switch keys)
+            ai_master_on = (
+                self._settings_cache.get("ai_master_enabled", "0") == "1" or
+                self._settings_cache.get("ai_fallback_enabled", "0") == "1"
+            )
             ai_mode = self._settings_cache.get("ai_operating_mode", "hybrid")
 
             # Fetch conversation context settings

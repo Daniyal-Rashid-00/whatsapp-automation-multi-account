@@ -80,7 +80,7 @@ class AIPage(QWidget):
         row_master = QHBoxLayout()
         row_master.setSpacing(14)
 
-        is_ai_on = get_setting("ai_master_enabled", get_setting("ai_fallback_enabled", "0")) == "1"
+        is_ai_on = (get_setting("ai_master_enabled", "0") == "1") or (get_setting("ai_fallback_enabled", "0") == "1")
         self.tog_ai_master = ToggleSwitch(checked=is_ai_on)
         self.tog_ai_master.stateChanged.connect(self._on_ai_master_toggled)
         row_master.addWidget(self.tog_ai_master, alignment=Qt.AlignmentFlag.AlignVCenter)
@@ -497,7 +497,7 @@ class AIPage(QWidget):
             self.lbl_m_title.setStyleSheet("font-weight: 700; font-size: 14px; color: #EF4444;")
 
     def load_settings(self):
-        master_on = get_setting("ai_master_enabled", get_setting("ai_fallback_enabled", "0")) == "1"
+        master_on = (get_setting("ai_master_enabled", "0") == "1") or (get_setting("ai_fallback_enabled", "0") == "1")
         self.tog_ai_master.blockSignals(True)
         self.tog_ai_master.setChecked(master_on)
         self.tog_ai_master.blockSignals(False)

@@ -107,7 +107,7 @@ class AISettingsWidget(QGroupBox):
         self.load_settings()
 
     def load_settings(self):
-        ai_on = get_setting("ai_fallback_enabled", "0") == "1"
+        ai_on = (get_setting("ai_master_enabled", "0") == "1") or (get_setting("ai_fallback_enabled", "0") == "1")
         self.chk_ai_enabled.setChecked(ai_on)
 
         context_on = get_setting("ai_context_enabled", "1") == "1"
@@ -140,7 +140,9 @@ class AISettingsWidget(QGroupBox):
             QMessageBox.critical(self, "Vault Error", "Failed to store API Key in credential vault.")
 
     def _save_settings(self):
-        set_setting("ai_fallback_enabled", "1" if self.chk_ai_enabled.isChecked() else "0")
+        state_val = "1" if self.chk_ai_enabled.isChecked() else "0"
+        set_setting("ai_master_enabled", state_val)
+        set_setting("ai_fallback_enabled", state_val)
         set_setting("ai_context_enabled", "1" if self.chk_context_enabled.isChecked() else "0")
         set_setting("ai_provider", self.cmb_provider.currentText().lower())
         set_setting("ai_model_name", self.txt_model_id.text().strip() or "gemini-3.5-flash")

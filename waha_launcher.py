@@ -86,10 +86,12 @@ class WAHALauncher:
             env["PORT"] = str(port)
             node_bin = shutil.which("node.exe") or shutil.which("node") or "node"
 
-            # Launch process with Windows detachment flags so it runs as an independent daemon
+            # Launch process with Windows detachment flags and Below Normal priority
+            # to guarantee user desktop and other applications never lag during heavy WhatsApp Web socket/crypto sync
             creation_flags = 0
             if os.name == 'nt':
-                creation_flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+                below_normal = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
+                creation_flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | below_normal
 
             subprocess.Popen(
                 [node_bin, "server.js"],
