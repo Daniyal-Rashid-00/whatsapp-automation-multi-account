@@ -12,6 +12,8 @@ def get_db_connection():
     target_db = os.environ.get("NEXUS_DB_PATH", DB_PATH)
     conn = sqlite3.connect(target_db, timeout=30.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA synchronous = NORMAL;")
+    conn.execute("PRAGMA cache_size = -8000;")
     return conn
 
 def init_db():

@@ -80,9 +80,10 @@ async function resolveLidToPhone(sessionClient, lidJid) {
   const cleanLid = String(lidJid).trim();
   const lidDigits = cleanLid.split('@')[0].replace(/[^0-9]/g, '');
 
-  // Tier 1: Check in-memory cache
+  // Tier 1: Check in-memory cache (including negative cache to avoid repeated evaluates)
   if (lidToPhoneCache.has(cleanLid)) {
     const cached = lidToPhoneCache.get(cleanLid);
+    if (cached === 'UNRESOLVED') return null;
     if (cached && cached !== lidDigits) {
       return cached;
     }
@@ -137,6 +138,8 @@ async function resolveLidToPhone(sessionClient, lidJid) {
     } catch (e) {}
   }
 
+  // Negative cache to prevent hammering Puppeteer evaluate on every subsequent message from this LID
+  lidToPhoneCache.set(cleanLid, 'UNRESOLVED');
   return null;
 }
 
@@ -179,6 +182,7 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
         qr: null,
         phone: null,
         client: null,
+        archivedChats: new Set(),
         error: null
       };
       sessionsMap.set(sessionName, sessionObj);
@@ -271,6 +275,9 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
           '--disable-sync',
           '--disable-default-apps',
           '--disable-translate',
+          '--disable-smooth-scrolling',
+          '--disable-composited-antialiasing',
+          '--disable-features=TranslateUI,BlinkGenPropertyTrees',
           '--metrics-recording-only'
         ]
       }
@@ -351,6 +358,37 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
         session: sessionName,
         payload: { status: 'WORKING', session: sessionName, phone: widUser }
       });
+
+      // Populate archived chats Set once on ready to eliminate CDP evaluates during hot message loop
+      try {
+        if (client.pupPage) {
+          const archived = await client.pupPage.evaluate(() => {
+            try {
+              const col = window.require ? window.require('WAWebCollections') : null;
+              if (col && col.Chat) {
+                const models = col.Chat.getModelsArray ? col.Chat.getModelsArray() : (col.Chat.models || []);
+                return models.filter(c => c && (c.archive === true || c.isArchived === true || c.archived === true || c.archive === 1))
+                             .map(c => c.id?._serialized || c.id?.user || String(c.id));
+              }
+            } catch (e) {}
+            return [];
+          });
+          if (Array.isArray(archived)) {
+            sessionObj.archivedChats = new Set(archived.filter(Boolean));
+            console.log(`🗂️ [${sessionName}] Pre-cached ${sessionObj.archivedChats.size} archived chats in memory.`);
+          }
+        }
+      } catch (e) {}
+    });
+
+    client.on('chat_archived', (chat, curr, prev) => {
+      if (!sessionObj.archivedChats) sessionObj.archivedChats = new Set();
+      const cid = chat.id?._serialized || (chat.id && chat.id.user ? `${chat.id.user}@c.us` : String(chat.id));
+      if (curr) {
+        sessionObj.archivedChats.add(cid);
+      } else {
+        sessionObj.archivedChats.delete(cid);
+      }
     });
 
     client.on('disconnected', (reason) => {
@@ -405,7 +443,7 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
         const isVoiceInit = msgTypeInit === 'ptt' || msgTypeInit === 'audio' || msgTypeInit === 'voice';
         const hasMediaInit = Boolean(msg.hasMedia) || isVoiceInit;
 
-        // Prevent duplicate processing - do not lock undecrypted empty stubs before body arrives
+        // Prevent duplicate processing - lock immediately in-memory (0ms)
         if (processedMsgIds.has(messageId)) return;
         const isEmptyPlaceholder = !isFromMe && !body.trim() && !hasMediaInit && !isVoiceInit;
         if (!isEmptyPlaceholder) {
@@ -415,14 +453,11 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
         // Skip status broadcast and groups
         if (fromJid.endsWith('@g.us') || toJid.endsWith('@g.us') || fromJid.includes('@broadcast') || fromJid === 'status@broadcast') return;
 
-        // Skip archived chats completely (respect user's manual archive organization)
-        try {
-          const chat = await msg.getChat();
-          if (chat && chat.archived) {
-            console.log(`🗂️ [${sessionName}] Skipping message from archived chat: ${fromJid || toJid}`);
-            return;
-          }
-        } catch (e) {}
+        // Skip archived chats completely using in-memory Set (0ms, 0 CPU, eliminates CDP evaluate)
+        if (sessionObj.archivedChats && (sessionObj.archivedChats.has(fromJid) || sessionObj.archivedChats.has(toJid))) {
+          console.log(`🗂️ [${sessionName}] Skipping message from archived chat: ${fromJid || toJid}`);
+          return;
+        }
 
         const msgType = String(msg.type || '').toLowerCase();
         const isVoice = msgType === 'ptt' || msgType === 'audio' || msgType === 'voice';
@@ -607,29 +642,31 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
         } else {
           // Inbound customer message (saved contacts, @lid, @c.us, active chats)
           const senderIdOnly = fromJid.split('@')[0];
-          let pushName = senderIdOnly;
+          // Use in-memory pushname directly from message model to avoid heavy CDP evaluate
+          let pushName = msg.notifyName || (msg._data && (msg._data.notifyName || msg._data.verifiedName)) || senderIdOnly;
           let realPhoneNumber = null;
 
           if (fromJid.endsWith('@lid')) {
             realPhoneNumber = await resolveLidToPhone(sessionObj.client, fromJid);
-            try {
-              const contact = await msg.getContact();
-              if (contact && (contact.pushname || contact.name || contact.verifiedName)) {
-                pushName = contact.pushname || contact.name || contact.verifiedName;
-              }
-            } catch (e) {}
-          } else {
-            try {
-              const contact = await msg.getContact();
-              if (contact) {
-                if (contact.pushname || contact.name || contact.verifiedName) {
+            if (!pushName || pushName === senderIdOnly) {
+              try {
+                const contact = await msg.getContact();
+                if (contact && (contact.pushname || contact.name || contact.verifiedName)) {
                   pushName = contact.pushname || contact.name || contact.verifiedName;
                 }
-                if (contact.id && contact.id.server === 'c.us') {
-                  realPhoneNumber = contact.number || contact.id.user;
+              } catch (e) {}
+            }
+          } else {
+            // For standard @c.us, senderPhone is directly the user digits of JID (0ms, 0 CDP calls)
+            realPhoneNumber = senderIdOnly;
+            if (!pushName || pushName === senderIdOnly) {
+              try {
+                const contact = await msg.getContact();
+                if (contact && (contact.pushname || contact.name || contact.verifiedName)) {
+                  pushName = contact.pushname || contact.name || contact.verifiedName;
                 }
-              }
-            } catch (e) {}
+              } catch (e) {}
+            }
           }
 
           const senderPhone = realPhoneNumber || senderIdOnly;
@@ -663,8 +700,9 @@ async function startWWebSession(sessionName = 'default', forceNew = false) {
       }
     };
 
+    // Single event listener: message_create captures 100% of messages (inbound + outbound)
+    // Removing the duplicate 'message' listener eliminates 50% of CDP evaluate and CPU load during chats
     client.on('message_create', handleAnyMessage);
-    client.on('message', handleAnyMessage);
 
     try {
       client.initialize().catch(err => {

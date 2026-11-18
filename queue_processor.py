@@ -137,6 +137,16 @@ class DurableQueueProcessor:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._wake_event: Optional[asyncio.Event] = None
         self._settings_cache = SettingsCache(ttl_seconds=3.0)
+        self._rules_cache: Optional[List[Dict[str, Any]]] = None
+        self._rules_last_fetch: float = 0.0
+
+    def get_cached_rules(self) -> List[Dict[str, Any]]:
+        """In-memory cache for rules to avoid hammering SQLite disk reads during chat bursts."""
+        now = time.time()
+        if self._rules_cache is None or (now - self._rules_last_fetch > 3.0):
+            self._rules_cache = get_all_rules()
+            self._rules_last_fetch = now
+        return self._rules_cache
 
     def set_global_automation(self, enabled: bool):
         self._global_automation_enabled = enabled
@@ -350,7 +360,7 @@ class DurableQueueProcessor:
                 rules_master_on = self._settings_cache.get("rules_master_enabled", "1") == "1"
                 matched_rule = None
                 if rules_master_on and not is_voice:
-                    rules = get_all_rules()
+                    rules = self.get_cached_rules()
                     matched_rule = match_inbound_message(body, rules, session_name=session_name)
                 elif not rules_master_on:
                     logging.info(f"Rules Master Switch is OFF. Skipping static rule matching for message {msg_id}.")
